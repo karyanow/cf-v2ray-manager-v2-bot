@@ -1,486 +1,3440 @@
-// V2Ray Telegram Bot Configuration and Localization
+// ================= IMPORTS (MUST BE FIRST) =================
+import {
+    get_text,
+    formatText,
+    extractCommand,
+    getSafeDisplayName,
+    sendOrEditMessage,
+    sendMessage,
+    editMessageText,
+    deleteMessage,
+    generateRandomKey,
+    checkChannelMembership,
+    sendPhoto,
+    sendDocument,
+    sendVideo,
+} from './utils.js';
+
+import {
+    get_user_language,
+    getUserById,
+    getUserByCriteria,
+    isUserBanned,
+    setBanStatus,
+    getUserState,
+    setUserState,
+    saveUser,
+    setUserLanguage,
+    getUserStats,
+    getUserActivityStats,
+    cleanReferrerId,
+    awardReferralCreditOnVerify,
+    setCredits,
+    savePremiumKey,
+    saveUserRedeemedKey,
+    getUserRedeemedKeys,
+    deleteUserRedeemedKey,
+    isAdmin,
+} from './db.js';
+
+import {
+    createTrialAccount,
+    getTrialKey,
+    createPremiumAccount,
+    deletePremiumAccount,
+    deleteTrialAccount,
+    deleteExpiredAccounts,
+    checkV2RayAccount,
+    transferAccount,
+    resetTrafficUsage,
+    modifyAccountDetails,
+    bulkCreateAccounts,
+    runExpiryWarnings,
+    getOptimalPanel,
+    getPanelStats,
+    getOnlineUsers,
+} from './api.js';
+
+import {
+    BOT_USERNAME,
+    CHANNEL_ID,
+    CHANNEL_URL,
+    OWNER_URL,
+    ADMIN_IDS,
+    PREMIUM_PLANS,
+    PREMIUM_DEFAULT_DAYS,
+    PREMIUM_PANEL_ID,
+    PAYMENT_METHODS,
+    DEFAULT_LANG,
+    LANG_EN,
+    LANG_MY,
+    USERS_PER_PAGE,
+    ONLINE_USERS_PER_PAGE,
+    REDEEMED_KEYS_PER_PAGE,
+    BROADCAST_BATCH_SIZE,
+    BROADCAST_DELAY_MS,
+    PREMIUM_CREDIT_PLANS,
+    CREDIT_COST_PER_GB,
+    REFERRAL_REWARD,
+    SERVER_NAMES,
+    TELEGRAM_BOT_TOKEN_ENV,
+} from './config.js';
+
+// ================= DATE HELPERS =================
+function formatDate(input) {
+    if (!input) return 'N/A';
+
+    // unix timestamp (seconds)
+    if (typeof input === 'number') {
+        return new Date(input * 1000).toLocaleString();
+    }
+
+    // numeric string timestamp
+    if (!isNaN(input)) {
+        return new Date(Number(input) * 1000).toLocaleString();
+    }
+
+    // already readable
+    return String(input);
+}
 
 // =========================================================================
-// CONFIGURATION
+// TELEGRAM BOT FUNCTIONS (BROADCAST/MEDIA)
 // =========================================================================
 
-// Global Keys for KV Storage
-export const BOT_USERS_KEY = 'bot_users';
-export const USER_STATE_KEY = 'user_state';
-export const USER_PREMIUM_KEYS_KEY = 'user_premium_keys';
+/**
+ * @description Processes a broadcast message by sending it to all users in batches.
+ * @param {Object} env Cloudflare environment object
+ */
+export async function processBroadcast(message, totalUsers, userList, loadingMessageId, chatId, lang, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    if (!token) {
+        console.error("TELEGRAM_BOT_TOKEN is missing in env.");
+        return { success: false, error: "Bot token not configured." };
+    }
 
-// Timezone handling for Asia/Yangon (UTC + 6 hours 30 minutes)
-export const MMT_OFFSET_SECONDS = 6.5 * 3600;
+    let messageType = 'text';
+    let content = '';
+    let media = null;
 
-// Bot Configuration (Placeholder: MUST BE UPDATED IN PRODUCTION)
-// NOTE: BOT_TOKEN will be provided via environment variables (e.g., env.TELEGRAM_BOT_TOKEN)
-export const TELEGRAM_BOT_TOKEN_ENV = 'TELEGRAM_BOT_TOKEN'; // Expected environment variable name
-export const BOT_USERNAME = 'V2RayChecker404Bot';
-// API_URL will be constructed dynamically in utils.js
+    // Determine message type and content/media details
+    if (message.text) {
+        content = message.text;
+        messageType = 'text';
+    } else if (message.photo) {
+        const photo = message.photo.slice(-1)[0];
+        const fileId = photo.file_id;
+        content = message.caption ?? '';
+        messageType = 'photo';
+        media = { url: fileId };
+    } else if (message.document) {
+        const fileId = message.document.file_id;
+        content = message.caption ?? '';
+        messageType = 'document';
+        media = { url: fileId };
+    } else if (message.video) {
+      const fileId = message.video.file_id;
+      content = message.caption ?? '';
+      messageType = 'video';
+      media = { url: fileId };
+    }
 
-// Admin Configuration
-export const ADMIN_IDS = [1273841502, 6285623251];
-export const OWNER_ID = 1273841502;
-export const OWNER_URL = 'tg://user?id=' + OWNER_ID;
+    let successCount = 0;
+    let failedCount = 0;
+    // @ts-ignore
+    const totalBatches = Math.ceil(totalUsers / BROADCAST_BATCH_SIZE);
 
-// V2Ray API Configuration
-export const V2RAY_API_URL = 'https://ttak-api.alwaysdata.net/api.php';
+    for (let i = 0; i < totalUsers; i += BROADCAST_BATCH_SIZE) {
+        const batch = userList.slice(i, i + BROADCAST_BATCH_SIZE);
 
-// Channel URL and ID
-export const CHANNEL_URL = 'https://t.me/TTAKVPN';
-export const CHANNEL_ID = '-1001218917905';
+        // Update loading message with current progress
+        const statusText = formatText(get_text('status_broadcasting', lang), totalUsers, Math.min(i + batch.length, totalUsers), totalUsers);
+        await sendOrEditMessage(chatId, statusText, loadingMessageId, null, token);
 
-// Server Configuration
-export const SERVER_NAMES = {
-    1: '🇸🇬 Singapore #1',
-    2: '🇸🇬 Singapore #2',
-    // Add more panels as needed
-};
-export const PREMIUM_DEFAULT_PANEL = 1; // Default panel if not specified for credit redemption
+        const batchPromises = batch.map(async (user) => {
+            try {
+                let result = { success: false, http_code: 0 };
+                let maxRetries = 2; // Allow up to 2 retries on rate limit or other recoverable error
+                let attempt = 0;
 
-// Stats configuration
-export const USERS_PER_PAGE = 9;
-export const ONLINE_USERS_PER_PAGE = 10;
-export const REDEEMED_KEYS_PER_PAGE = 5;
-export const BROADCAST_BATCH_SIZE = 10;
-export const BROADCAST_DELAY_MS = 2500; // ⚠️ Delay between batches (2.5 seconds)
+                while (attempt < maxRetries) {
+                    attempt++;
 
-// --- PREMIUM PLAN CONFIGURATION ---
-export const PREMIUM_PLANS = {
-    150: { gb: 150, price: '4,000 MMK' },
-    250: { gb: 250, price: '5,500 MMK' },
-    500: { gb: 500, price: '7,500 MMK' },
-};
-export const PREMIUM_DEFAULT_DAYS = 30;
-export const PREMIUM_PANEL_ID = 2; // Kept for legacy non-configurable premium
+                    // Telegram methods expect slightly different data structures
+                    const dataToSend = {
+                        chat_id: user.user_id,
+                        parse_mode: 'Markdown',
+                        disable_web_page_preview: true,
+                        caption: content,
+                        text: content,
+                        // Use fileId/url determined earlier
+                        photo: media?.url,
+                        document: media?.url,
+                        video: media?.url
+                    };
 
-// --- REFERRAL & CREDIT CONFIGURATION ---
-export const PREMIUM_CREDIT_PLANS = {
-    5: { gb: 5, cost: 0.5 },
-    10: { gb: 10, cost: 1.0 }
-};
-export const CREDIT_COST_PER_GB = 0.1;
-export const REFERRAL_REWARD = 0.5; // 0.5 Credits awarded to REFERRER
+                    switch (messageType) {
+                        case 'photo':
+                            result = await sendPhoto(user.user_id, dataToSend.photo, dataToSend.caption, token);
+                            break;
+                        case 'document':
+                            result = await sendDocument(user.user_id, dataToSend.document, dataToSend.caption, token);
+                            break;
+                        case 'video':
+                            result = await sendVideo(user.user_id, dataToSend.video, dataToSend.caption, token);
+                            break;
+                        case 'text':
+                        default:
+                            result = await sendMessage(user.user_id, dataToSend.text, null, true, token);
+                            break;
+                    }
 
-// --- PAYMENT METHOD CONFIGURATION ---
-export const PAYMENT_METHODS = {
-    'wavepay': { name_en: 'Wave Pay', name_my: 'Wave Pay', account_name: 'KAUNG HTET', number: '09772350006' },
-    'kbzpay': { name_en: 'KBZ Pay', name_my: 'KBZ Pay', account_name: 'MYINT MYAT NADAR SOE', number: '09678426521' },
-};
+                    if (result.success) {
+                        return 'success';
+                    }
 
-// --- Localization Constants ---
-export const LANG_MY = 'my';
-export const LANG_EN = 'en';
-export const DEFAULT_LANG = LANG_EN;
+                    // Handle Rate Limit (429) specifically
+                    if (result.http_code === 429) {
+                        const retryAfter = result.data?.parameters?.retry_after || 5; // Default 5 seconds
+                        console.warn(`Rate limit (429) hit for user ${user.user_id}. Waiting for ${retryAfter}s...`);
+                        await new Promise(resolve => setTimeout(resolve, retryAfter * 1000 + 500)); // Wait and add buffer
+                        // Continue to next iteration for retry
+                    } else if (result.http_code === 403) {
+                         // User blocked bot, don't retry.
+                         return 'blocked';
+                    } else {
+                        // Other error, just log and fail for this user
+                        console.error(`Broadcast API failed for user ${user.user_id} (${messageType}, HTTP ${result.http_code}):`, result.data);
+                        break;
+                    }
+                }
+
+                // If loop finishes without success (including being blocked or failing retries)
+                return 'failed';
+
+            } catch (e) {
+                console.error(`Broadcast exception for user ${user.user_id}:`, e);
+                return 'failed';
+            }
+        });
+
+        // Wait for all promises in the current batch
+        const results = await Promise.allSettled(batchPromises);
+
+        for (const result of results) {
+            if (result.status === 'fulfilled' && result.value === 'success') {
+                successCount++;
+            } else if (result.status === 'fulfilled' && (result.value === 'failed' || result.value === 'blocked')) {
+                failedCount++;
+            } else if (result.status === 'rejected') {
+                failedCount++;
+            }
+        }
+
+        // Delay between batches to prevent hitting global rate limits
+        if (i + BROADCAST_BATCH_SIZE < totalUsers) {
+            await new Promise(resolve => setTimeout(resolve, BROADCAST_DELAY_MS));
+        }
+    }
+
+    return {
+        success: true,
+        success_count: successCount,
+        failed_count: failedCount,
+        total_users: totalUsers
+    };
+}
+
 
 // =========================================================================
-// LOCALIZATION DATA
+// COMMAND HANDLERS - All KV/API calls now pass 'env'
 // =========================================================================
 
-export const MESSAGES = {
-    // --- General / Welcome ---
-    'welcome_start_line1': { [LANG_EN]: "Hi %s! Welcome to this bot", [LANG_MY]: "မင်္ဂလာပါ %s! ဤဘော့သို့ ကြိုဆိုပါတယ်" },
-    'welcome_separator': { [LANG_EN]: "━━━━━━━━━━━━━━━━━━━━━━", [LANG_MY]: "━━━━━━━━━━━━━━━━━━━━━━" },
-    'welcome_bot_desc': { [LANG_EN]: "V2Ray Manager Bot is your reliable V2Ray account management assistant!\nUse /premium to view our plans.", [LANG_MY]: "V2Ray Manager Bot သည် သင်၏ ယုံကြည်စိတ်ချရသော V2Ray အကောင့် စီမံခန့်ခွဲမှု လက်ထောက်ဖြစ်ပါသည်။\nPlan များကို ကြည့်ရန် /premium ကို အသုံးပြုပါ။" },
-    'welcome_join_prompt': {
-        [LANG_EN]: `Don't forget to [join](${CHANNEL_URL}) for updates!`,
-        [LANG_MY]: `သတင်းအချက်အလက်များအတွက် [join](${CHANNEL_URL}) ထားဖို့ မမေ့ပါနဲ့!`
-    },
-    'welcome_invited_by': { [LANG_EN]: "\n\n🤝 You were invited by %s!", [LANG_MY]: "\n\n🤝 သင့်ကို %s မှ ဖိတ်ခေါ်ထားပါတယ်!" },
+/**
+ * Handle /trial command (Create a new trial account)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleTrial(chatId, userId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
 
-    // --- Command Descriptions (Main Menu) ---
-    'available_commands': { [LANG_EN]: "📋 *Available Commands:*", [LANG_MY]: "📋 *အသုံးပြုနိုင်သည့် Command များ*:" },
-    'quick_check_tip': { [LANG_EN]: "⚡ *Quick Check:* Just send your V2Ray config to check account status!", [LANG_MY]: "⚡ *အမြန်စစ်ဆေးခြင်း:* သင်၏ V2Ray config ကို ပို့ရုံဖြင့် အကောင့်အခြေအနေကို စစ်ဆေးနိုင်ပါသည်။" },
-    'powered_by': { [LANG_EN]: "⚡ TTAK VPN", [LANG_MY]: "⚡ TTAK VPN CHANNEL မှ ပံ့ပိုးသည်" },
-    'features_title': { [LANG_EN]: "💡 *Features:*", [LANG_MY]: "💡 *လုပ်ဆောင်ချက်များ*:" },
-    'features_list': {
-        [LANG_EN]: "• Auto trial account creation\n• Traffic monitoring\n• Expiry tracking\n• Multi-protocol support",
-        [LANG_MY]: "• အစမ်းသုံးအကောင့် အလိုအလျောက် ဖန်တီးပေးခြင်း\n• Traffic စောင့်ကြည့်ခြင်း\n• သက်တမ်းကုန်ဆုံးမှု ခြေရာခံခြင်း\n• Protocol မျိုးစုံကို ထောက်ပံ့ခြင်း"
-    },
-    'cmd_admin': { [LANG_EN]: "/admin - Open the Admin Control Panel", [LANG_MY]: "/admin - Admin ထိန်းချုပ်ရေး Panel ဖွင့်ရန်" },
-    'cmd_premium': { [LANG_EN]: "/premium - View premium plans and purchase", [LANG_MY]: "/premium - Premium Plan များကို ကြည့်ရှုဝယ်ယူရန်" },
-    'cmd_trial': { [LANG_EN]: "/trial - Create a new trial account", [LANG_MY]: "/trial - အစမ်းသုံးအကောင့်အသစ် ဖန်တီးရန်" },
-    'cmd_mytrial': { [LANG_EN]: "/mytrial - Get your existing trial account", [LANG_MY]: "/mytrial - သင်၏ လက်ရှိအစမ်းသုံးအကောင့်ကို ရယူရန်" },
-    'cmd_apps': { [LANG_EN]: "/apps - Get VPN apps for your device", [LANG_MY]: "/apps - သင့်စက်အတွက် VPN App များရယူရန်" },
-    'cmd_id': { [LANG_EN]: "/id <ID/USERNAME> - Get user information", [LANG_MY]: "/id <ID/USERNAME> - သုံးစွဲသူ အချက်အလက်များ ရယူရန်" },
-    'cmd_language': { [LANG_EN]: "/language - Change bot language (English/Burmese)", [LANG_MY]: "/language - ဘော့ဘာသာစကားပြောင်းရန် (အင်္ဂလိပ်/မြန်မာ)" },
-    'cmd_help': { [LANG_EN]: "/help - Show help information", [LANG_MY]: "/help - အကူအညီအချက်အလက်များကို ပြသရန်" },
-    'cmd_referral': { [LANG_EN]: "/referral - Manage your referral link and credits", [LANG_MY]: "/referral - သင်၏ဖိတ်ခေါ်လင့်ခ်နှင့် Credits များကို စီမံရန်" },
-    'cmd_online': { [LANG_EN]: "/online - View currently connected users", [LANG_MY]: "/online - လက်ရှိချိတ်ဆက်ထားသော သုံးစွဲသူများအား ကြည့်ရန်" },
+    const initialMsg = await sendMessage(
+        chatId,
+        get_text('status_creating_trial', lang),
+        null,
+        true,
+        token
+    );
+    const messageId = initialMsg.data?.result?.message_id;
 
-    // --- Menu Buttons ---
-    'button_main_menu': { [LANG_EN]: "⚙️ Main Menu", [LANG_MY]: "⚙️ မူရင်း Menu" },
-    'button_about_me': { [LANG_EN]: "ℹ️ About Me", [LANG_MY]: "ℹ️ ဘော့အကြောင်း" },
-    'button_policy_terms': { [LANG_EN]: "📄 Policy & Terms", [LANG_MY]: "📄 ပေါ်လစီနှင့် စည်းမျဉ်းများ" },
-    'button_back_to_start': { [LANG_EN]: "⬅️ Back to Start Menu", [LANG_MY]: "⬅️ အစမှစသည့် Menu သို့ ပြန်သွားရန်" },
-    'button_back': { [LANG_EN]: '⬅️ Back', [LANG_MY]: '⬅️ ပြန်သွားရန်' },
-    'button_contact_admin': { [LANG_EN]: "📩 Contact Admin", [LANG_MY]: "📩 Admin အား ဆက်သွယ်ရန်" },
-    'button_channel_link': { [LANG_EN]: "CHANNEL 404 [🇲🇲]", [LANG_MY]: "CHANNEL 404 [🇲🇲]" },
+    await setUserState(userId, 'clear', {}, env);
 
-    // --- About Me Menu Content ---
-    'about_name': { [LANG_EN]: "Name: V2Ray Manager ⚙️", [LANG_MY]: "အမည်: V2Ray Manager ⚙️" },
-    'about_version': { [LANG_EN]: "Version: v2.0 (Beta) 🛠", [LANG_MY]: "ဗားရှင်း: v2.0 (Beta) 🛠" },
-    'about_dev_team': { [LANG_EN]: "Development Team:", [LANG_MY]: "တီထွင်သူ အဖွဲ့:" },
-    'about_creator': { [LANG_EN]: "- Creator: [4 0 4 \\ 2.0 - 🇲🇲](tg://user?id=1273841502) 👨‍💻", [LANG_MY]: "- ဖန်တီးသူ: [4 0 4 \\ 2.0 - 🇲🇲](tg://user?id=1273841502) 👨‍💻" },
-    'about_tech_stack': { [LANG_EN]: "Technical Stack:", [LANG_MY]: "နည်းပညာပိုင်းဆိုင်ရာ အခြေခံ:" },
-    'about_language': { [LANG_EN]: "- Language: JavaScript 🌐", [LANG_MY]: "- ဘာသာစကား: JavaScript 🌐" },
-    'about_database': { [LANG_EN]: "- Database: Cloudflare KV 🗄", [LANG_MY]: "- ဒေတာဘေ့စ်: Cloudflare KV 🗄" },
-    'about_hosting': { [LANG_EN]: "- Hosting: Cloudflare Worker ☁️", [LANG_MY]: "- Hosting: Cloudflare Worker ☁️" },
-    'about_main_desc': {
-        [LANG_EN]: "About: This bot is developed to simplify the management of V2Ray accounts, including trial creation, account checking, and premium services. We aim to provide a secure and efficient service.",
-        [LANG_MY]: "အကြောင်း: ဤဘော့ကို အစမ်းသုံးအကောင့်ဖန်တီးခြင်း၊ အကောင့်စစ်ဆေးခြင်းနှင့် ပရီမီယံဝန်ဆောင်မှုများအပါအဝင် V2Ray အကောင့်များကို စီမံခန့်ခွဲရာတွင် လွယ်ကူစေရန် တီထွင်ထားပါသည်။ ကျွန်ုပ်တို့သည် လုံခြုံပြီး ထိရောက်သော ဝန်ဆောင်မှုများကို ပေးအပ်ရန် ရည်ရွယ်ပါသည်။"
-    },
-    'button_stats_about': { [LANG_EN]: "📊 Statistics", [LANG_MY]: "📊 စာရင်းအင်းများ" },
-    'button_server_info': { [LANG_EN]: "💾 Server", [LANG_MY]: "💾 ဆာဗာ အချက်အလက်" },
+    const result = await createTrialAccount(userId);
 
-    // --- Server Info content (UPDATED) ---
-    'server_info_title': { [LANG_EN]: "💾 *Server & Panel Status*", [LANG_MY]: "💾 *ဆာဗာနှင့် Panel အခြေအနေ*" },
-    'server_info_content': {
-        [LANG_EN]: "Our V2Ray management system operates across multiple panels to ensure high availability and load balancing.\n\n" +
-            "• *API Endpoint:* `ttak-api.alwaysdata.net`\n" +
-            "• *Online Panels:* 3 (Panel 1, 2, 3)\n" +
-            "• *Uptime Target:* 99.99 %\n\n" +
-            `For real-time status and maintenance announcements, please check our [Channel](${CHANNEL_URL}).`,
-        [LANG_MY]: "ကျွန်ုပ်တို့၏ V2Ray စီမံခန့်ခွဲမှု စနစ်သည် မြင့်မားသော အသုံးပြုနိုင်မှုနှင့် ဝန်မျှတမှု (load balancing) ကို သေချာစေရန် Panel များစွာတွင် လည်ပတ်ပါသည်။\n\n" +
-            "• *API Endpoint:* `ttak-api.alwaysdata.net`\n" +
-            "• *Online Panels:* ၃ ခု (Panel 1, 2, 3)\n" +
-            "• *ဆက်လက်လည်ပတ်မှု ပစ်မှတ်:* 99.99 %\n\n" +
-            `အချိန်နှင့်တပြေးညီ အခြေအနေနှင့် ထိန်းသိမ်းမှု ကြေညာချက်များအတွက် ကျွန်ုပ်တို့၏ [Channel](${CHANNEL_URL}) ကို စစ်ဆေးပါ။`
-    },
-    'server_info_online_panels': { [LANG_EN]: "• *Online Panels:* %d / %d", [LANG_MY]: "• *Online Panels:* %d / %d" },
-    'server_info_panel_status': { [LANG_EN]: "Status of Panel %s: %s", [LANG_MY]: "Panel %s ၏ အခြေအနေ: %s" },
-    'server_info_api_error': { [LANG_EN]: "Error fetching panel stats: %s", [LANG_MY]: "Panel စာရင်းအင်းများ ရယူရာတွင် အမှားဖြစ်သည်: %s" },
+    if (result.success) {
+        const data = result.data;
 
-    // --- Other Menu Contents ---
-    'menu_main_title': { [LANG_EN]: "⚙️ *Main Menu Commands*", [LANG_MY]: "⚙️ *မူရင်း Menu Command များ*" },
-    'menu_policy_content': {
-        [LANG_EN]: "*📄 Policy & Terms*\n\n1. Trial accounts are valid for 24 hours only.\n2. Do not use the service for illegal activities.\n3. Abuse will result in permanent account deletion.\n4. All sales are final and non-refundable.",
-        [LANG_MY]: "*📄 ပေါ်လစီနှင့် စည်းမျဉ်းများ*\n\n၁။ အစမ်းသုံးအကောင့်များသည် ၂၄ နာရီသာ အကျုံးဝင်ပါသည်။\n၂။ ဝန်ဆောင်မှုများကို တရားမဝင်သော လုပ်ဆောင်မှုများအတွက် အသုံးမပြုရပါ။\n၃။ အလွဲသုံးစားပြုပါက အကောင့်ကို အပြီးအပိုင် ဖျက်သိမ်းသွားမည်ဖြစ်သည်။\n၄။ ရောင်းချပြီးသော ဝန်ဆောင်မှုများအတွက် ငွေပြန်အမ်းမည်မဟုတ်ပါ။"
-    },
+        const message =
+            get_text('trial_success_title', lang) +
+            "\n━━━━━━━━━━━━━━━━━━━━━━\n\n" +
+            get_text('field_email', lang) + ` \`${data.email}\`\n` +
+            get_text('field_password', lang) + ` \`${data.password}\`\n` +
+            get_text('field_data_limit', lang) + ` ${data.data_limit}\n` +
+            get_text('field_expiry', lang) + ` ${formatDate(data.expiry)}\n` +
+            get_text('field_panel', lang) + ` ${data.panel_name}\n\n` +
+            get_text('field_link', lang) + `\`\`\`${data.link}\`\`\`\n\n` +
+            get_text('field_qr', lang) + `\n${data.qr_code}\n\n` +
+            get_text('tip_copy_link', lang);
 
-    // --- PREMIUM PLAN DESCRIPTION LOCALIZATION ---
-    'button_view_plans': { [LANG_EN]: "📄 View Plan Details", [LANG_MY]: "📄 Plan အသေးစိတ် ကြည့်ရန်" },
-    'menu_premium_desc_title': { [LANG_EN]: "💎 Premium Plan Details", [LANG_MY]: "💎 Premium Plan အသေးစိတ်" },
-    'menu_premium_desc_content': {
-        [LANG_EN]: "*Standard (150 GB) - 4,000 MMK*\n_Affordable for everyone_\n- Unlimited Devices\n- 150 GB Premium Servers\n- High-Speed Private Servers\n- No-Log Policy\n- 30 Days Validity\n\n*Premium (250 GB) - 5,500 MMK*\n_For media consumption_\n- Unlimited Devices\n- 250 GB Premium Servers\n- High-Speed Private Servers\n- No-Log Policy\n- 30 Days Validity\n\n*Premium+ (500 GB) - 7,500 MMK*\n_Suitable for multi-device usage_\n- Unlimited Devices\n- 500 GB Premium Servers\n- High-Speed Private Servers\n- No-Log Policy\n- 30 Days Validity",
-        [LANG_MY]: "*Standard (150 GB) - 4,000 MMK*\n_လူတိုင်းအတွက် တတ်နိုင်သောစျေးနှုန်း_\n- Unlimited Devices\n- 150 GB Premium Servers\n- High-Speed Private Servers\n- No-Log Policy\n- ရက် 30 သက်တမ်း\n\n*Premium (250 GB) - 5,500 MMK*\n_မီဒီယာအသုံးပြုရန်အတွက်_\n- Unlimited Devices\n- 250 GB Premium Servers\n- High-Speed Private Servers\n- No-Log Policy\n- ရက် 30 သက်တမ်း\n\n*Premium+ (500 GB) - 7,500 MMK*\n_စက်များစွာ အသုံးပြုရန် သင့်တော်သည်_\n- Unlimited Devices\n- 500 GB Premium Servers\n- High-Speed Private Servers\n- No-Log Policy\n- ရက် 30 သက်တမ်း"
-    },
+        await sendOrEditMessage(chatId, message, messageId, null, token);
+    } else {
+        let errorMessage =
+            get_text('error_creation_failed', lang) +
+            "\n━━━━━━━━━━━━━━━━━━━━━━\n\n" +
+            get_text('error_prefix', lang) + ` \`${result.error}\``;
 
-    // --- PREMIUM PAYMENT LOCALIZATION ---
-    'menu_premium_title': { [LANG_EN]: "💎 Premium V2Ray Plans", [LANG_MY]: "💎 Premium V2Ray Plan များ" },
-    'premium_select_plan': { [LANG_EN]: "*Select a plan to purchase (30 Days Validity):*", [LANG_MY]: "*ဝယ်ယူလိုသော Plan ကို ရွေးချယ်ပါ (ရက် 30 သက်တမ်း)*:" },
-    'button_plan': { [LANG_EN]: "%dGB - %s", [LANG_MY]: "%dGB - %s" },
+        await sendOrEditMessage(chatId, errorMessage, messageId, null, token);
+    } else {
+        // FIX: Change 'const' to 'let' to allow reassignment via +=
+        let errorMessage = get_text('error_creation_failed', lang) + "\n━━━━━━━━━━━━━━━━━━━━━━\n\n" +
+            get_text('error_prefix', lang) + ` \`${result.error}\`\n`;
 
-    'prompt_select_method': { [LANG_EN]: "💳 *Select your payment method for %dGB (%s):*", [LANG_MY]: "💳 *%dGB (%s) အတွက် ငွေပေးချေမှုနည်းလမ်း ရွေးချယ်ပါ*:" },
-    'button_wavepay': { [LANG_EN]: "💶 Wave Pay", [LANG_MY]: "💶 Wave Pay" },
-    'button_kbzpay': { [LANG_EN]: "💵 KBZ Pay", [LANG_MY]: "💵 KBZ Pay" },
-    'button_ayapay': { [LANG_EN]: "💴 AYA Pay", [LANG_MY]: "💴 AYA Pay" },
+        // Check for specific error to show appropriate tip
+        if (result.error.includes('already exists')) {
+            // @ts-ignore
+            errorMessage += "\n" + get_text('tip_create_new_trial', lang).replace('/trial', '/mytrial');
+        }
 
-    'plan_details_title': { [LANG_EN]: "Selected Plan: %dGB (%s)", [LANG_MY]: "ရွေးချယ်ထားသော Plan: %dGB (%s)" },
-    'payment_instructions_title': { [LANG_EN]: "🏦 Payment Instructions", [LANG_MY]: "🏦 ငွေပေးချေမှု ညွှန်ကြားချက်များ" },
+        // 4. Edit the message to show the error
+        await sendOrEditMessage(chatId, errorMessage, messageId, null, token);
+    }
+}
 
-    'payment_instructions_detail': {
-        [LANG_EN]: "Please pay to the account below:\n\n*Method:* %s\n*Account Name:* %s\n*Account Number:* `%s`\n\n*Note:* After payment, send your Transaction ID (TxID) in the next message. *You may send the full TxID or the last 5 digits.*",
-        [LANG_MY]: "ကျေးဇူးပြု၍ အောက်ပါအကောင့်သို့ ငွေပေးချေပါ:\n\n*နည်းလမ်း:* %s\n*အကောင့်အမည်:* %s\n*အကောင့်နံပါတ်:* `%s`\n\n*မှတ်ချက်:* ငွေပေးချေပြီးပါက သင်၏ Transaction ID (TxID) ကို နောက်ထပ်မက်ဆေ့ချ်တွင် ပို့ပေးပါ။ *TxID အပြည့်အစုံ သို့မဟုတ် နောက်ဆုံး ၅ လုံးကို ပို့နိုင်ပါသည်။*"
-    },
+/**
+ * Handle /mytrial command (Get existing trial account)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleMyTrial(chatId, userId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
 
-    'prompt_txid': { [LANG_EN]: "✅ *Waiting for Transaction ID (TxID)*. Please send the TxID or screenshot text now:", [LANG_MY]: "✅ *Transaction ID (TxID) ကို စောင့်ဆိုင်းနေသည်*. ကျေးဇူးပြု၍ TxID သို့မဟုတ် စကရင်ရှော့စာသားကို ယခုပို့ပေးပါ:" },
-    'error_no_txid': { [LANG_EN]: "❌ *Submission failed. Please send the Transaction ID (TxID) only*.", [LANG_MY]: "❌ *တင်ပြမှု မအောင်မြင်ပါ။ Transaction ID (TxID) ကို သာ ပို့ပေးပါ။*" },
-    'txid_submitted_user': { [LANG_EN]: "⏳ *TxID Submitted!* We received your TxID: `%s`. Your request is now pending admin approval. We will notify you once approved.", [LANG_MY]: "⏳ *TxID တင်ပြပြီးပါပြီ!* သင်၏ TxID: `%s` ကို လက်ခံရရှိပါပြီ။ သင်၏တောင်းဆိုမှုအား Admin မှ ခွင့်ပြုချက်ပေးရန် စောင့်ဆိုင်းနေပါသည်။ ခွင့်ပြုသည်နှင့် သင့်အား အကြောင်းကြားပါမည်။" },
+    const initialMsg = await sendMessage(
+        chatId,
+        get_text('status_retrieving_trial', lang),
+        null,
+        true,
+        token
+    );
+    const messageId = initialMsg.data?.result?.message_id;
 
-    // --- Admin Notification Fields ---
-    'admin_new_purchase': { [LANG_EN]: "🔔 *NEW PREMIUM PURCHASE PENDING!*", [LANG_MY]: "🔔 *Premium ဝယ်ယူမှုအသစ် ခွင့်ပြုချက် စောင့်ဆိုင်းနေသည်!*" },
-    'admin_field_method': { [LANG_EN]: "🏦 Method:", [LANG_MY]: "🏦 နည်းလမ်း:" },
-    'admin_field_txid': { [LANG_EN]: "🔢 Transaction ID:", [LANG_MY]: "🔢 Transaction ID:" },
-    'admin_field_userid': { [LANG_EN]: "🆔 User ID:", [LANG_MY]: "🆔 User ID:" },
-    'admin_field_time': { [LANG_EN]: "⏰ Time:", [LANG_MY]: "⏰ အချိန်:" },
-    'admin_approve_btn': { [LANG_EN]: "✅ Approve & Create %dGB", [LANG_MY]: "✅ ခွင့်ပြုပြီး %dGB ဖန်တီးပါ" },
-    'admin_reject_btn': { [LANG_EN]: "❌ Reject & Notify", [LANG_MY]: "❌ ငြင်းပယ်ပြီး အကြောင်းကြားပါ" },
-    'admin_usage_approve': { [LANG_EN]: "❌ *Usage:* /approve `<USER_ID> <GB_PLAN>`", [LANG_MY]: "❌ *အသုံးပြုပုံ:* /approve `<USER_ID> <GB_PLAN>`" },
-    'admin_usage_reject': { [LANG_EN]: "❌ *Usage:* /reject `<USER_ID>`", [LANG_MY]: "❌ *အသုံးပြုပုံ:* /reject `<USER_ID>`" },
-    'approval_success_user': { [LANG_EN]: "✅ *Payment Approved!*\nYour %dGB Premium Account is now active!", [LANG_MY]: "✅ *ငွေပေးချေမှု ခွင့်ပြုပါသည်!*\nသင်၏ %dGB Premium Account ကို စတင်အသုံးပြုနိုင်ပါပြီ!" },
-    'approval_rejected_user': { [LANG_EN]: "❌ *Payment Rejected.* Please check your payment details and contact support @TTAK19 if needed. (TxID: `%s`)", [LANG_MY]: "❌ *ငွေပေးချေမှု ငြင်းပယ်ပါသည်*. သင်၏ငွေပေးချေမှု အချက်အလက်များကို စစ်ဆေးပါ၊ လိုအပ်ပါက Support @TTAK19 ကို ဆက်သွယ်ပါ။ (TxID: `%s`)" },
-    'error_plan_not_found': { [LANG_EN]: "❌ *Invalid plan selected.*", [LANG_MY]: "❌ *မမှန်ကန်သော Plan ကို ရွေးချယ်ထားပါသည်။*" },
-    'error_admin_approval_failed': { [LANG_EN]: "❌ *Approval Failed*. Admin must use the correct /approve format.", [LANG_MY]: "❌ *ခွင့်ပြုချက် မအောင်မြင်ပါ*. Admin သည် မှန်ကန်သော /approve ပုံစံကို သုံးရပါမည်။" },
-    'error_admin_reject_failed': { [LANG_EN]: "❌ *Rejection Failed*. Could not find user state.", [LANG_MY]: "❌ *ငြင်းပယ်မှု မအောင်မြင်ပါ*. သုံးစွဲသူ၏ အခြေအနေကို ရှာမတွေ့ပါ။" },
-    'admin_rejection_done': { [LANG_EN]: "✅ *User %d notified of rejection.*", [LANG_MY]: "✅ *သုံးစွဲသူ %d ကို ငြင်းပယ်ကြောင်း အကြောင်းကြားပြီးပါပြီ။*" },
-    'error_already_waiting': { [LANG_EN]: "⚠️ You already have a pending purchase for %dGB. Please send the TxID or use /start to cancel.", [LANG_MY]: "⚠️ သင်သည် %dGB အတွက် ဝယ်ယူမှုတစ်ခု ပြုလုပ်ထားပြီးဖြစ်သည်။ ကျေးဇူးပြု၍ TxID ကို ပို့ပါ သို့မဟုတ် ပယ်ဖျက်ရန် /start ကို သုံးပါ။" },
-    'field_account_name': { [LANG_EN]: "🔑 *Account Name (Key):*", [LANG_MY]: "🔑 *အကောင့်အမည် (Key):*" },
+    await setUserState(userId, 'clear', {}, env);
 
-    // --- Ban/Unban Localization ---
-    'cmd_ban': { [LANG_EN]: "/ban `<ID/USERNAME>` - Ban a user from the bot", [LANG_MY]: "/ban `<ID/USERNAME>` - သုံးစွဲသူအား ဘော့အသုံးပြုခွင့် ပိတ်ရန်" },
-    'cmd_unban': { [LANG_EN]: "/unban `<ID/USERNAME>` - Unban a user from the bot", [LANG_MY]: "/unban `<ID/USERNAME>` - သုံးစွဲသူအား ဘော့အသုံးပြုခွင့် ဖွင့်ရန်" },
-    'error_user_already_banned': { [LANG_EN]: "❌ *User already banned*", [LANG_MY]: "❌ *သုံးစွဲသူသည် ပိတ်ပင်ထားပြီးသားဖြစ်သည်*" },
-    'error_user_not_banned': { [LANG_EN]: "❌ *User is not currently banned*", [LANG_MY]: "❌ *သုံးစွဲသူအား ပိတ်ပင်ထားခြင်းမရှိပါ*" },
-    'error_cannot_ban_admin': { [LANG_EN]: "❌ *Cannot ban an admin*", [LANG_MY]: "❌ *Admin အား ပိတ်ပင်ခွင့်မပြုပါ*" },
-    'ban_success_admin': { [LANG_EN]: "✅ *User %s has been successfully banned.*", [LANG_MY]: "✅ *သုံးစွဲသူ %s အား ပိတ်ပင်လိုက်ပါပြီ။*" },
-    'unban_success_admin': { [LANG_EN]: "✅ *User %s has been successfully unbanned.*", [LANG_MY]: "✅ *သုံးစွဲသူ %s အား ပိတ်ပင်မှုမှ ပြန်လည်ဖွင့်လိုက်ပါပြီ။*" },
-    'user_banned_notification': {
-        [LANG_EN]: "❌ *Account Suspension Notice*\n━━━━━━━━━━━━━━━━━\nYou are currently banned from using this bot due to policy violation or abuse.\n\n_If you believe this was a mistake or want to appeal, please contact the admin._",
-        [LANG_MY]: "❌ *အကောင့်ပိတ်သိမ်းခြင်း အကြောင်းကြားစာ*\n━━━━━━━━━━━━━━━━━\nပေါ်လစီချိုးဖောက်မှု သို့မဟုတ် အလွဲသုံးစားပြုမှုကြောင့် ဤဘော့အသုံးပြုခွင့်ကို ပိတ်ပင်ထားပါသည်။\n\n_အကယ်၍ မှားယွင်းမှုဖြစ်ကြောင်း သို့မဟုတ် ပြန်လည်တောင်းဆိုလိုပါက Admin အား ဆက်သွယ်ပါ။_"
-    },
-    'user_unbanned_notification': {
-        [LANG_EN]: "✅ *Account Reactivated*\n━━━━━━━━━━━━━━━━━\nYour ban has been lifted. You can now use the bot again. Welcome back!",
-        [LANG_MY]: "✅ *အကောင့်ပြန်လည်အသုံးပြုနိုင်ပါပြီ*\n━━━━━━━━━━━━━━━━━\nသင်၏ ပိတ်ပင်မှုအား ရုပ်သိမ်းလိုက်ပါပြီ။ ဘော့ကို ပြန်လည်အသုံးပြုနိုင်ပါပြီ။ ပြန်လည်ကြိုဆိုပါသည်။"
-    },
-    'access_denied_banned': {
-        [LANG_EN]: "*❌ Access Denied!*\n━━━━━━━━━━━━━━━━━\n*You are currently banned from using this bot.*\n\n_If you believe this was a mistake or want to appeal, please contact the admin._",
-        [LANG_MY]: "*❌ အသုံးပြုခွင့် ငြင်းပယ်ပါသည်!*\n━━━━━━━━━━━━━━━━━\n*သင်သည် ဤဘော့အသုံးပြုခွင့် ပိတ်ပင်ခံထားရပါသည်။*\n\n_အကယ်၍ မှားယွင်းမှုဖြစ်ကြောင်း သို့မဟုတ် ပြန်လည်တောင်းဆိုလိုပါက Admin အား ဆက်သွယ်ပါ။_"
-    },
+    const result = await getTrialKey(userId);
 
-    // --- Admin Commands (UPDATED) ---
-    'button_admin_menu': { [LANG_EN]: "👑 Admin Tools", [LANG_MY]: "👑 Admin ကိရိယာများ" },
-    'button_admin_manage': { [LANG_EN]: "🛠 Manage Accounts", [LANG_MY]: "🛠 အကောင့်စီမံရန်" },
-    'button_admin_automation': { [LANG_EN]: "⚙️ Automation", [LANG_MY]: "⚙️ အလိုအလျောက်လုပ်ဆောင်ခြင်း" },
-    'button_admin_kv': { [LANG_EN]: "🗄 KV Tools", [LANG_MY]: "🗄 KV ကိရိယာများ" },
-    'menu_admin_title': { [LANG_EN]: "👑 *Admin Control Panel*", [LANG_MY]: "👑 *Admin ထိန်းချုပ်ရေး Panel*" },
-    'admin_menu_desc': { [LANG_EN]: "Select a category to manage V2Ray accounts and bot operations:", [LANG_MY]: "V2Ray အကောင့်များနှင့် ဘော့လုပ်ဆောင်မှုများကို စီမံခန့်ခွဲရန် အမျိုးအစားတစ်ခုကို ရွေးချယ်ပါ:" },
+    if (result.success) {
+        const data = result.data;
 
-    'admin_commands': { [LANG_EN]: "👑 *Admin Commands:*", [LANG_MY]: "👑 *Admin Command များ*:" },
-    'cmd_create': { [LANG_EN]: "/create `<GB> <NAME> <DAYS> [PANEL]` - Create premium", [LANG_MY]: "/create `<GB> <NAME> <DAYS> [PANEL]` - Premium ဖန်တီးရန်" },
-    'cmd_delprem': { [LANG_EN]: "/delprem `<NAME> <PANEL>` - Delete premium", [LANG_MY]: "/delprem `<NAME> <PANEL>` - Premium ဖျက်ရန်" },
-    'cmd_deltrial': { [LANG_EN]: "/deltrial `<ID>` - Delete trial account", [LANG_MY]: "/deltrial `<ID>` - အစမ်းသုံးအကောင့် ဖျက်ရန်" },
-    'cmd_delexp': { [LANG_EN]: "/delexp `[PANEL]` - Delete expired accounts", [LANG_MY]: "/delexp `[PANEL]` - သက်တမ်းကုန် အကောင့်များ ဖျက်ရန်" },
-    'cmd_stats': { [LANG_EN]: "/stats - View bot statistics", [LANG_MY]: "/stats - ဘော့ စာရင်းအင်းများကြည့်ရန်" },
-    'cmd_broadcast': { [LANG_EN]: "/broadcast - Send message to all users", [LANG_MY]: "/broadcast - သုံးစွဲသူအားလုံးသို့ စာများပို့ရန်" },
-    'cmd_reply': { [LANG_EN]: "/reply `<USER_ID> <MESSAGE>` - Reply to user", [LANG_MY]: "/reply `<USER_ID> <MESSAGE>` - သုံးစွဲသူအား ပြန်လည်ဖြေကြားရန်" },
-    'cmd_approve': { [LANG_EN]: "/approve `<ID> <GB>` - Approve purchase", [LANG_MY]: "/approve `<ID> <GB>` - ဝယ်ယူမှုခွင့်ပြုရန်" },
-    'cmd_reject': { [LANG_EN]: "/reject `<ID>` - Reject purchase", [LANG_MY]: "/reject `<ID>` - ဝယ်ယူမှုငြင်းပယ်ရန်" },
-    'cmd_ban_full': { [LANG_EN]: "/ban `<ID/USERNAME>` - Ban a user from the bot", [LANG_MY]: "/ban `<ID/USERNAME>` - သုံးစွဲသူအား ဘော့အသုံးပြုခွင့် ပိတ်ရန်" },
-    'cmd_unban_full': { [LANG_EN]: "/unban `<ID/USERNAME>` - Unban a user from the bot", [LANG_MY]: "/unban `<ID/USERNAME>` - သုံးစွဲသူအား ဘော့အသုံးပြုခွင့် ဖွင့်ရန်" },
-    // NEW COMMANDS
-    'cmd_transfer': { [LANG_EN]: "/transfer `<USER> <FROM> <TO>` - Transfer account between panels", [LANG_MY]: "/transfer `<USER> <FROM> <TO>` - အကောင့်တစ်ခုကို Panel များအကြား လွှဲပြောင်းရန်" },
-    'cmd_resettraffic': { [LANG_EN]: "/reset `<USER> <PANEL>` - Reset user's traffic usage", [LANG_MY]: "/reset `<USER> <PANEL>` - သုံးစွဲသူ၏ Traffic အသုံးပြုမှုကို သတ်မှတ်ရန်" },
-    'cmd_modify': { [LANG_EN]: "/mod `<USER> <P> <GB> <D> [PASS]` - Modify account details", [LANG_MY]: "/mod `<USER> <P> <GB> <D> [PASS]` - အကောင့်အသေးစိတ် ပြုပြင်ရန်" },
-    'cmd_bulkcreate': { [LANG_EN]: "/bulk `<NAMES,> <GB> <DAYS> <P>` - Create multiple premium accounts", [LANG_MY]: "/bulk `<NAMES,> <GB> <DAYS> <P>` - Premium အကောင့်များစွာ ဖန်တီးရန်" },
-    'cmd_runwarnings': { [LANG_EN]: "/runwarnings - Manually run account expiry warnings (Cron)", [LANG_MY]: "/runwarnings - သက်တမ်းကုန်ခါနီး သတိပေးချက်များကို ကိုယ်တိုင် စစ်ဆေးရန် (Cron)" },
-    'cmd_optimal': { [LANG_EN]: "/optimal `[type]` - Suggest best panel for creation", [LANG_MY]: "/optimal `[type]` - အကောင်းဆုံး Panel ကို အကြံပြုရန်" },
-    'cmd_getkv': { [LANG_EN]: "/getkv `<KEY>` - Retrieve KV key value", [LANG_MY]: "/getkv `<KEY>` - KV key value ကို ရယူရန်" },
-    'cmd_setkv': { [LANG_EN]: "/setkv `<KEY> <JSON_VALUE>` - Set KV key value", [LANG_MY]: "/setkv `<KEY> <JSON_VALUE>` - KV key value ကို သတ်မှတ်ရန်" },
-    'admin_kv_get_success': { [LANG_EN]: "✅ KV Data for key `%s`:", [LANG_MY]: "✅ KV Data key `%s` အတွက်:" },
-    'admin_kv_set_success': { [LANG_EN]: "✅ KV Key `%s` updated successfully.", [LANG_MY]: "✅ KV Key `%s` ကို အောင်မြင်စွာ အပ်ဒိတ်လုပ်ပြီးပါပြီ။" },
-    'admin_kv_error': { [LANG_EN]: "❌ KV Operation Failed: %s", [LANG_MY]: "❌ KV လုပ်ဆောင်မှု မအောင်မြင်ပါ: %s" },
-    'admin_kv_usage_get': { [LANG_EN]: "❌ *Usage:* /getkv `<KEY>`", [LANG_MY]: "❌ *အသုံးပြုပုံ:* /getkv `<KEY>`" },
-    'admin_kv_usage_set': { [LANG_EN]: "❌ *Usage:* /setkv `<KEY> <JSON_VALUE>`", [LANG_MY]: "❌ *အသုံးပြုပုံ:* /setkv `<KEY> <JSON_VALUE>`" },
-    'admin_add_credit_success': { [LANG_EN]: "✅ Added %.1f credits to user %s. Current: %.1f", [LANG_MY]: "✅ သုံးစွဲသူ %s ထံသို့ %.1f Credits ပေါင်းထည့်ပြီးပါပြီ။ လက်ရှိ: %.1f" },
-    'admin_remove_credit_success': { [LANG_EN]: "✅ Removed %.1f credits from user %s. Current: %.1f", [LANG_MY]: "✅ သုံးစွဲသူ %s ထံမှ %.1f Credits နုတ်ယူပြီးပါပြီ။ လက်ရှိ: %.1f" },
-    'admin_credit_usage_add': { [LANG_EN]: "/addcredit `<ID/USERNAME> <AMOUNT>` - Add credit to user", [LANG_MY]: "/addcredit `<ID/USERNAME> <AMOUNT>` - သုံးစွဲသူအား Credit ထည့်ရန်" },
-    'admin_credit_usage_remove': { [LANG_EN]: "/removecredit `<ID/USERNAME> <AMOUNT>` - Remove credit from user", [LANG_MY]: "/removecredit `<ID/USERNAME> <AMOUNT>` - သုံးစွဲသူထံမှ Credit နုတ်ရန်" },
-    'admin_credit_value_error': { [LANG_EN]: "❌ Amount must be a positive number.", [LANG_MY]: "❌ ပမာဏသည် အပေါင်းကိန်းဂဏန်းဖြစ်ရမည်။" },
+        let expiryStatus = data.expiry.status;
+        if (expiryStatus === 'expired') {
+            expiryStatus = get_text('expiry_expired', lang);
+        } else if (expiryStatus === 'expiring_soon') {
+            expiryStatus = get_text('expiry_expiring_soon', lang);
+        }
 
-    // --- New Status Messages for Admin Commands ---
-    'status_transferring': { [LANG_EN]: "🔄 *Transferring account %s from panel %d to %d...*", [LANG_MY]: "🔄 *အကောင့် %s ကို Panel %d မှ %d သို့ လွှဲပြောင်းနေသည်...*" },
-    'status_resetting': { [LANG_EN]: "🔄 *Resetting traffic for account %s on panel %d...*", [LANG_MY]: "🔄 *Panel %d ရှိ အကောင့် %s ၏ Traffic ကို သတ်မှတ်နေသည်...*" },
-    'status_modifying': { [LANG_EN]: "🔄 *Modifying account %s on panel %d...*", [LANG_MY]: "🔄 *Panel %d ရှိ အကောင့် %s ကို ပြုပြင်နေသည်...*" },
-    'status_running_warnings': { [LANG_EN]: "🔄 *Running expiry warnings (Cron job emulation)...*", [LANG_MY]: "🔄 *သက်တမ်းကုန်ခါနီး သတိပေးချက်များ စစ်ဆေးနေသည် (Cron)...*" },
-    'status_optimal_panel': { [LANG_EN]: "🔍 *Finding optimal %s panel...*", [LANG_MY]: "🔍 *အကောင်းဆုံး %s Panel ကို ရှာဖွေနေသည်...*" },
-    'status_bulk_create': { [LANG_EN]: "🔄 *Starting bulk creation of %d accounts...*", [LANG_MY]: "🔄 *အကောင့် %d ခုအတွက် အစုလိုက် ဖန်တီးမှု စတင်နေသည်...*" },
-    'status_fetching_online': { [LANG_EN]: "🔄 *Fetching online user list...*", [LANG_MY]: "🔄 *Online ဝင်နေသော သုံးစွဲသူစာရင်းကို ရယူနေသည်...*" },
-    'transfer_success': { [LANG_EN]: "✅ *Account Transfer Successful!*\n\nFrom: Panel %s\nTo: Panel %s\nAccount: `%s`", [LANG_MY]: "✅ *အကောင့်လွှဲပြောင်းမှု အောင်မြင်ပါသည်!*\n\nမှ: Panel %s\nသို့: Panel %s\nအကောင့်: `%s`" },
-    'reset_success': { [LANG_EN]: "✅ *Traffic Reset Successful!*\n\nAccount: `%s`\nPanel: %s\nStatus: %s", [LANG_MY]: "✅ *Traffic သတ်မှတ်မှု အောင်မြင်ပါသည်!*\n\nအကောင့်: `%s`\nPanel: %s\nအခြေအနေ: %s" },
-    'modify_success': { [LANG_EN]: "✅ *Account Modification Successful!*\n\nAccount: `%s`\nPanel: %s\nStatus: %s", [LANG_MY]: "✅ *အကောင့်ပြုပြင်မှု အောင်မြင်ပါသည်!*\n\nအကောင့်: `%s`\nPanel: %s\nအခြေအနေ: %s" },
-    'bulk_success': { [LANG_EN]: "✅ *Bulk Create Initiated!*", [LANG_MY]: "✅ *အစုလိုက်ဖန်တီးမှု စတင်ပါပြီ!*" },
-    'warnings_success': { [LANG_EN]: "✅ *Expiry Warnings Run!*", [LANG_MY]: "✅ *သက်တမ်းကုန်ခါနီး သတိပေးချက်များ ပြီးဆုံးပါပြီ!*" },
-    'optimal_success': { [LANG_EN]: "✅ *Optimal Panel Found:*\n\nPanel ID: %d\nName: %s\nType: %s", [LANG_MY]: "✅ *အကောင်းဆုံး Panel ကို တွေ့ရှိပါသည်:*\n\nPanel ID: %d\nအမည်: %s\nအမျိုးအစား: %s" },
-    'usage_transfer': { [LANG_EN]: "❌ *Usage:* /transfer `<USER> <FROM_PANEL> <TO_PANEL>`\n\nExample: `/transfer user@test.com 1 2`", [LANG_MY]: "❌ *အသုံးပြုပုံ:* /transfer `<USER> <FROM_PANEL> <TO_PANEL>`\n\nဥပမာ: `/transfer user@test.com 1 2`" },
-    'usage_resettraffic': { [LANG_EN]: "❌ *Usage:* /reset `<USER> <PANEL>`\n\nExample: `/reset user@test.com 1`", [LANG_MY]: "❌ *အသုံးပြုပုံ:* /reset `<USER> <PANEL>`\n\nဥပမာ: `/reset user@test.com 1`" },
-    'usage_modify': { [LANG_EN]: "❌ *Usage:* /mod `<USER> <PANEL> <GB> <DAYS> [NEW_PASS]`\n\nExample: `/mod user@test.com 1 250 30` or `/mod user@test.com 1 0 0 newpass123`", [LANG_MY]: "❌ *အသုံးပြုပုံ:* /mod `<USER> <PANEL> <GB> <DAYS> [NEW_PASS]`\n\nဥပမာ: `/mod user@test.com 1 250 30` သို့မဟုတ် `/mod user@test.com 1 0 0 newpass123`" },
-    'usage_bulkcreate': { [LANG_EN]: "❌ *Usage:* /bulk `<NAMES,> <GB> <DAYS> <PANEL>`\n\nExample: `/bulk user1,user2,user3 150 30 1`", [LANG_MY]: "❌ *အသုံးပြုပုံ:* /bulk `<NAMES,> <GB> <DAYS> <PANEL>`\n\nဥပမာ: `/bulk user1,user2,user3 150 30 1`" },
-    'usage_optimal': { [LANG_EN]: "❌ *Usage:* /optimal `[premium/trial]`\n\nExample: `/optimal premium`", [LANG_MY]: "/optimal `[type]` - အကောင်းဆုံး Panel ကို အကြံပြုရန်" },
-    'error_invalid_panel_range': { [LANG_EN]: "❌ Invalid Panel ID. Must be an integer > 0.", [LANG_MY]: "❌ Panel ID မမှန်ကန်ပါ။ integer > 0 ဖြစ်ရပါမည်။" },
-    'error_no_panels_online': { [LANG_EN]: "❌ No panels are currently reported as online.", [LANG_MY]: "❌ လက်ရှိတွင် Online အဖြစ် သတင်းပို့ထားသော Panel မရှိပါ။" },
-    'menu_online_users_title': { [LANG_EN]: "🌐 *Currently Online Users*", [LANG_MY]: "🌐 *လက်ရှိ Online ဝင်နေသော သုံးစွဲသူများ*" },
-    'field_total_online': { [LANG_EN]: "👥 *Total Online:* %d", [LANG_MY]: "👥 *စုစုပေါင်း Online:* %d" },
-    'field_online_on_panel': { [LANG_EN]: "📡 Panel %s (%d users):", [LANG_MY]: "📡 Panel %s (%d ယောက်):" },
-    'nav_online_prev': { [LANG_EN]: "⬅️ Previous", [LANG_MY]: "⬅️ ယခင်စာမျက်နှာ" },
-    'nav_online_next': { [LANG_EN]: "Next ➡️", [LANG_MY]: "နောက်စာမျက်နှာ ➡️" },
-    'no_online_users_found': { [LANG_EN]: "✅ No users are currently reported as online on any panel.", [LANG_MY]: "✅ မည်သည့် Panel တွင်မှ Online ဝင်နေသော သုံးစွဲသူ မရှိပါ။" },
+        const message =
+            get_text('trial_account_info_title', lang) +
+            "\n━━━━━━━━━━━━━━━━━━━━━━\n\n" +
+            get_text('field_email', lang) + ` \`${data.email}\`\n` +
+            get_text('field_password', lang) + ` \`${data.password}\`\n` +
+            get_text('field_data_usage', lang) +
+            ` ${data.traffic.used.text} / ${data.traffic.total.text}\n` +
+            get_text('field_remaining', lang) +
+            ` ${data.traffic.remaining.text}\n` +
+            get_text('field_expiry', lang) +
+            ` ${formatDate(data.expiry.expiry_date)} (${expiryStatus})\n` +
+            get_text('field_panel', lang) + ` ${data.panel_name}\n\n` +
+            get_text('field_link', lang) + `\`\`\`${data.link}\`\`\`\n\n` +
+            get_text('field_qr', lang) + `\n${data.qr_code}\n\n` +
+            get_text('tip_copy_link', lang);
 
-    // --- Language Command Specific ---
-    'lang_select_title': { [LANG_EN]: "🌐 *Select your preferred language:*", [LANG_MY]: "🌐 *သင်နှစ်သက်သော ဘာသာစကားကို ရွေးချယ်ပါ*:" },
-    'lang_button_en': { [LANG_EN]: "🇬🇧 English", [LANG_MY]: "🇬🇧 English" },
-    'lang_button_my': { [LANG_EN]: "🇲🇲 မြန်မာ (Burmese)", [LANG_MY]: "🇲🇲 မြန်မာ (Burmese)" },
-    'lang_confirmed': { [LANG_EN]: "✅ Language set to *%s*.", [LANG_MY]: "✅ ဘာသာစကားကို *%s* သို့ ပြောင်းလဲပြီးပါပြီ။" },
-    'lang_name_en': { [LANG_EN]: "English", [LANG_MY]: "အင်္ဂလိပ်" },
-    'lang_name_my': { [LANG_EN]: "Burmese", [LANG_MY]: "မြန်မာ" },
+        await sendOrEditMessage(chatId, message, messageId, null, token);
+    } else {
+        const errorMessage =
+            get_text('error_account_not_found', lang) +
+            "\n━━━━━━━━━━━━━━━━━━━━━━\n\n" +
+            get_text('error_prefix', lang) + ` \`${result.error}\``;
 
-    // --- Referral / Credit Localization (UPDATED) ---
-    'menu_referral_title': { [LANG_EN]: "🤝 Referral Program & Credits", [LANG_MY]: "🤝 ဖိတ်ခေါ်သူ အစီအစဉ်နှင့် Credits များ" },
-    'referral_desc': {
-        [LANG_EN]: "Invite friends! You get *%.1f Credits* when they join the channel and verify. They must verify channel join to redeem credits.",
-        [LANG_MY]: "သူငယ်ချင်းများကို ဖိတ်ခေါ်ပါ။ သူတို့ Channel ဝင်ပြီး စစ်ဆေးသည်နှင့် *%.1f Credits* ရရှိမည်။ Credits လဲလှယ်ရန် Channel Join စစ်ဆေးရန် လိုအပ်ပါသည်။"
-    },
-    'field_your_credits': { [LANG_EN]: "💰 *Your Credits:*", [LANG_MY]: "💰 *သင်၏ Credits:*" },
-    'field_referred_count': { [LANG_EN]: "👥 *Referred Users:*", [LANG_MY]: "👥 *ဖိတ်ခေါ်ထားသူ စုစုပေါင်း:*" },
-    'field_your_link': { [LANG_EN]: "🔗 *Your Referral Link:*\n", [LANG_MY]: "🔗 *သင်၏ ဖိတ်ခေါ်လင့်ခ်:*\n" },
-    'button_redeem_5gb': { [LANG_EN]: "💎 Redeem 5GB (%.1f Credits)", [LANG_MY]: "💎 5GB လဲလှယ်ရန် (%.1f Credits)" },
-    'button_redeem_10gb': { [LANG_EN]: "💎 Redeem 10GB (%.1f Credits)", [LANG_MY]: "💎 10GB လဲလှယ်ရန် (%.1f Credits)" },
-    'button_redeem_custom': { [LANG_EN]: "Custom GB Redemption", [LANG_MY]: "စိတ်ကြိုက် GB လဲလှယ်ခြင်း" },
-    'prompt_redeem_custom_gb': { [LANG_EN]: "💰 *Enter the GB amount you wish to redeem (min 1GB, cost %.1f Credit/GB):*", [LANG_MY]: "💰 *လဲလှယ်လိုသော GB ပမာဏကို ရိုက်ထည့်ပါ (အနည်းဆုံး 1GB, ကုန်ကျစရိတ် %.1f Credit/GB)*:" },
-    'error_invalid_gb_amount': { [LANG_EN]: "❌ Invalid GB amount. Must be an integer ≥ 1.", [LANG_MY]: "❌ GB ပမာဏ မမှန်ကန်ပါ။ integer ≥ 1 ဖြစ်ရပါမည်။" },
-    'error_insufficient_credits_custom': { [LANG_EN]: "❌ Insufficient credits. %.1f GB requires %.1f credits.", [LANG_MY]: "❌ Credits မလုံလောက်ပါ။ %.1f GB အတွက် %.1f credits လိုအပ်ပါသည်။" },
-    'button_verify_join': { [LANG_EN]: "✅ Verify Channel Join", [LANG_MY]: "✅ Channel Join စစ်ဆေးရန်" },
-    'button_credit_history': { [LANG_EN]: "🧾 Credit History", [LANG_MY]: "🧾 Credit မှတ်တမ်း" },
-    'button_view_my_keys': { [LANG_EN]: "🔑 View My Redeemed Keys", [LANG_MY]: "🔑 ကျွန်ုပ်လဲလှယ်ထားသော ကီးများ ကြည့်ရန်" },
-    'menu_credit_history_title': { [LANG_EN]: "🧾 Your Credit Transaction History", [LANG_MY]: "🧾 သင်၏ Credit အသုံးပြုမှု မှတ်တမ်း" },
-    'credit_history_entry_add': { [LANG_EN]: "+%.1f Credits (%s) on %s", [LANG_MY]: "+%.1f Credits (%s) %s တွင်" },
-    'credit_history_entry_deduct': { [LANG_EN]: "-%.1f Credits (%s) on %s", [LANG_MY]: "-%.1f Credits (%s) %s တွင်" },
-    'credit_history_empty': { [LANG_EN]: "No credit transactions yet.", [LANG_MY]: "Credit မှတ်တမ်း မရှိသေးပါ။" },
-    'credit_source_referral': { [LANG_EN]: "Referral from %s", [LANG_MY]: "%s မှ ဖိတ်ခေါ်သူ" },
-    'credit_source_admin_add': { [LANG_EN]: "Admin Add", [LANG_MY]: "Admin ထည့်သွင်း" },
-    'credit_source_admin_deduct': { [LANG_EN]: "Admin Deduct", [LANG_MY]: "Admin နုတ်ယူ" },
-    'credit_source_redeem': { [LANG_EN]: "%dGB Redemption", [LANG_MY]: "%dGB လဲလှယ်ခြင်း" },
-    'join_channel_prompt': { [LANG_EN]: `Before verifying, please ensure you have joined our [Channel](${CHANNEL_URL}):`, [LANG_MY]: `မစစ်ဆေးမီ ကျွန်ုပ်တို့၏ [Channel](${CHANNEL_URL}) သို့ ဝင်ထားပြီးကြောင်း သေချာပါစေ။` },
-    'status_not_joined': { [LANG_EN]: "❌ You must join the channel to get referral credits.", [LANG_MY]: "❌ Referral Credits ရရှိရန် Channel ကို ဝင်ရပါမည်။" },
-    'status_already_joined': { [LANG_EN]: "✅ You have already joined and been verified. You can now redeem your credits.", [LANG_MY]: "✅ သင်သည် Channel ကို ဝင်ရောက်ပြီး စစ်ဆေးပြီးပါပြီ။ သင်၏ Credits များကို ယခုလဲလှယ်နိုင်ပါပြီ။" },
-    'status_credit_rewarded_referrer': {
-        [LANG_EN]: "🎉 Referral confirmed! You received %.1f Credits from referred user %s for joining the channel.",
-        [LANG_MY]: "🎉 ဖိတ်ခေါ်မှု အတည်ပြုပြီးပါပြီ။ သုံးစွဲသူ %s မှ Channel ဝင်ခြင်းအတွက် သင် %.1f Credits ရရှိသွားပါပြီ။"
-    },
-    'error_channel_check_fail': { [LANG_EN]: "❌ Failed to check channel membership.", [LANG_MY]: "❌ Channel ဝင်ရောက်မှုကို စစ်ဆေးရန် မအောင်မြင်ပါ။" },
-    'error_insufficient_credits': { [LANG_EN]: "❌ Insufficient credits. You need %.1f credits for this plan.", [LANG_MY]: "❌ Credits မလုံလောက်ပါ။ ဤ Plan အတွက် %.1f credits လိုအပ်ပါသည်။" },
-    'error_unverified_redeem': { [LANG_EN]: "❌ Channel verification required to redeem. Please click '✅ Verify Channel Join' first.", [LANG_MY]: "❌ Credits လဲလှယ်ရန် Channel Join စစ်ဆေးရန် လိုအပ်ပါသည်။ ကျေးဇူးပြု၍ '✅ Channel Join စစ်ဆေးရန်' ကို အရင်နှိပ်ပါ။" },
-    'status_redeeming': { [LANG_EN]: "🔄 *Redeeming %dGB Premium...*", [LANG_MY]: "🔄 *%dGB Premium လဲလှယ်နေသည်...*" },
-    'redeem_success_user': { [LANG_EN]: "✅ Redemption Successful! %dGB Premium Account is now active on %s. %.1f credits deducted.", [LANG_MY]: "✅ လဲလှယ်မှု အောင်မြင်ပါသည်! %dGB Premium Account ကို %s တွင် စတင်အသုံးပြုနိုင်ပါပြီ။ %.1f Credits နုတ်ယူလိုက်ပါသည်။" },
-    'field_redeemed_account': { [LANG_EN]: "✨ *Redeemed Account Details:*", [LANG_MY]: "✨ *လဲလှယ်ထားသော အကောင့်အသေးစိတ်*:" },
-    'prompt_select_panel': { [LANG_EN]: "📡 *Select a Server Panel for your %dGB Premium:*", [LANG_MY]: "📡 *သင်၏ %dGB Premium အတွက် Server Panel ကို ရွေးချယ်ပါ*:" },
-    'prompt_select_panel_create': { [LANG_EN]: "📡 *Select a Server Panel for %s (%dGB):*", [LANG_MY]: "📡 *%s (%dGB) အတွက် Server Panel ကို ရွေးချယ်ပါ*:" },
-    'panel_button_name': { [LANG_EN]: "%s", [LANG_MY]: "%s" },
-    'field_panel_name': { [LANG_EN]: "📡 *Server Panel:*", [LANG_MY]: "📡 *Server Panel:*" },
+        await sendOrEditMessage(chatId, errorMessage, messageId, null, token);
+    }
+}
 
-    // --- Key Management Localization (NEW) ---
-    'menu_my_keys_title': { [LANG_EN]: "🔑 *Your Redeemed Premium Keys*", [LANG_MY]: "🔑 *သင်လဲလှယ်ထားသော Premium ကီးများ*" },
-    'key_details_title': { [LANG_EN]: "Key Details: `%s`", [LANG_MY]: "Key အသေးစိတ်: `%s`" },
-    'field_account_key': { [LANG_EN]: "🔑 *Account Key:*", [LANG_MY]: "🔑 *အကောင့်ကီး:*" },
-    'field_key_limit': { [LANG_EN]: "📊 *Data Limit:*", [LANG_MY]: "📊 *ဒေတာကန့်သတ်ချက်:*" },
-    'field_key_panel': { [LANG_EN]: "📡 *Panel:*", [LANG_MY]: "📡 *Panel:*" },
-    'field_key_date': { [LANG_EN]: "📅 *Redeemed On:*", [LANG_MY]: "📅 *လဲလှယ်သည့်ရက်စွဲ:*" },
-    'button_delete_key': { [LANG_EN]: "🗑️ Delete Key: %s", [LANG_MY]: "🗑️ ကီး ဖျက်ရန်: %s" },
-    'button_view_key': { [LANG_EN]: "🔎 View Details", [LANG_MY]: "🔎 အသေးစိတ် ကြည့်ရန်" },
-    'no_redeemed_keys': { [LANG_EN]: "You have not redeemed any keys yet.", [LANG_MY]: "သင်သည် ကီးများ လဲလှယ်ထားခြင်း မရှိသေးပါ။" },
-    'error_key_not_found': { [LANG_EN]: "❌ Key not found or does not belong to you.", [LANG_MY]: "❌ ကီးကို ရှာမတွေ့ပါ သို့မဟုတ် သင့်အကောင့်မှ မဟုတ်ပါ။" },
-    'error_delete_not_redeemed': { [LANG_EN]: "❌ Only keys purchased with credits can be deleted here.", [LANG_MY]: "❌ Credits ဖြင့် ဝယ်ယူထားသော ကီးများကိုသာ ဤနေရာမှ ဖျက်နိုင်ပါသည်။" },
-    'confirm_delete_key': { [LANG_EN]: "⚠️ Are you sure you want to delete key `%s` from Panel %s?", [LANG_MY]: "⚠️ `%s` ကီးကို Panel %s မှ ဖျက်ပစ်ရန် သေချာပါသလား။" },
-    'key_deleted_success': { [LANG_EN]: "✅ Key `%s` deleted successfully from Panel %s.", [LANG_MY]: "✅ `%s` ကီးကို Panel %s မှ အောင်မြင်စွာ ဖျက်ပစ်လိုက်ပါပြီ။" },
-    'key_delete_fail': { [LANG_EN]: "❌ Failed to delete key `%s`. API Error: %s", [LANG_MY]: "❌ `%s` ကီးကို ဖျက်ရန် မအောင်မြင်ပါ။ API အမှား: %s" },
-    'nav_key_prev': { [LANG_EN]: "⬅️ Previous", [LANG_MY]: "⬅️ ယခင်စာမျက်နှာ" },
-    'nav_key_next': { [LANG_EN]: "Next ➡️", [LANG_MY]: "နောက်စာမျက်နှာ ➡️" },
-    'error_redemption_state_fail': { [LANG_EN]: "❌ Redemption Error. Please try again from the referral menu.", [LANG_MY]: "❌ လဲလှယ်မှု အမှား။ ကျေးဇူးပြု၍ referral menu မှ ပြန်လည်စမ်းသပ်ပါ။" },
+/**
+ * Handle /ban command (Admin only)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleBan(chatId, criteria, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    if (!isAdmin(chatId)) {
+        await sendMessage(chatId, get_text('admin_access_denied', lang), null, true, token);
+        return;
+    }
 
-    // --- STATS MENU AND USAGE REPORT LOCALIZATION ---
-    'button_usage_report': { [LANG_EN]: "📈 Usage Report", [LANG_MY]: "📈 အသုံးပြုမှု အစီရင်ခံစာ" },
-    'button_top_users': { [LANG_EN]: "🏆 Top Users", [LANG_MY]: "🏆 ထိပ်တန်း သုံးစွဲသူများ" },
+    const targetUser = await getUserByCriteria(criteria, env);
+    if (!targetUser) {
+        await sendMessage(chatId, formatText(get_text('error_user_not_found', lang), criteria), null, true, token);
+        return;
+    }
 
-    'menu_basic_stats_title': { [LANG_EN]: "🗒 V2Ray Manager Basic Statistics Menu", [LANG_MY]: "🗒 V2Ray Manager အခြေခံ စာရင်းအင်း Menu" },
-    'menu_basic_stats_tip': { [LANG_EN]: "Stay Updated With Real Time Insights....⚡️", [LANG_MY]: "အချိန်နှင့်တစ်ပြေးညီ အချက်အလက်များကို သိရှိနိုင်သည်....⚡️" },
-    'menu_basic_stats_content': {
-        [LANG_EN]: "๏ Full Statistics: Get Full Statistics Of V2Ray Manager ⚙️\n• Top Users: Get Top User's Leaderboard 🔥\n• Growth Trends: Get Knowledge About Growth 👁\n• Activity Times: See Which User Is Most Active ⏰\n• Milestones: Track Special Achievements 🏅\n\n💡 Select an option and take control:",
-        [LANG_MY]: "• အပြည့်အစုံ စာရင်းအင်း: V2Ray Manager ၏ အပြည့်အစုံ စာရင်းအင်းများကို ရယူပါ ⚙️\n• ထိပ်တန်းသုံးစွဲသူများ: ထိပ်တန်း သုံးစွဲသူများ၏ ဦးဆောင်စာရင်းကို ရယူပါ 🔥\n• တိုးတက်မှုလမ်းကြောင်းများ: တိုးတက်မှုအကြောင်း သိရှိရန် 👁\n• လှုပ်ရှားမှုအချိန်များ: မည်သည့်သုံးစွဲသူသည် အများဆုံးအသုံးပြုကြောင်း ကြည့်ရန် ⏰\n• မှတ်တိုင်များ: အထူးအောင်မြင်မှုများကို ခြေရာခံပါ 🏅\n\n💡 ရွေးချယ်စရာတစ်ခုကို ရွေးချယ်ပြီး ထိန်းချုပ်ပါ:"
-    },
+    const targetUserId = targetUser.user_id;
+    const targetName = getSafeDisplayName(targetUser); // Use safe display name
 
-    'stats_report_title': { [LANG_EN]: "V2Ray Manager Bot Status ✅", [LANG_MY]: "V2Ray Manager Bot Status ✅" },
-    'stats_active_day': { [LANG_EN]: "1 Day: %d users were active", [LANG_MY]: "၁ ရက်အတွင်း: %d ဦး အသုံးပြုခဲ့သည်" },
-    'stats_active_week': { [LANG_EN]: "1 Week: %d users were active", [LANG_MY]: "၁ ပတ်အတွင်း: %d ဦး အသုံးပြုခဲ့သည်" },
-    'stats_active_month': { [LANG_EN]: "1 Month: %d users were active", [LANG_MY]: "၁ လအတွင်း: %d ဦး အသုံးပြုခဲ့သည်" },
-    'stats_active_year': { [LANG_EN]: "1 Year: %d users were active", [LANG_MY]: "၁ နှစ်အတွင်း: %d ဦး အသုံးပြုခဲ့သည်" },
-    'stats_total_users_line': { [LANG_EN]: "Total V2Ray Manager Users: %d ✅", [LANG_MY]: "စုစုပေါင်း V2Ray Manager သုံးစွဲသူ: %d ✅" },
+    if (isAdmin(targetUserId)) {
+        await sendMessage(chatId, get_text('error_cannot_ban_admin', lang), null, true, token);
+        return;
+    }
 
-    // --- Status / Error Messages (START) ---
-    'status_creating_trial': { [LANG_EN]: "🔄 *Creating your trial account...*", [LANG_MY]: "🔄 *သင်၏ အစမ်းသုံးအကောင့် ဖန်တီးနေသည်...*" },
-    'status_retrieving_trial': { [LANG_EN]: "🔍 *Retrieving your trial account...*", [LANG_MY]: "🔍 *သင်၏ အစမ်းသုံးအကောင့်ကို ရှာဖွေနေသည်...*" },
-    'status_checking_config': { [LANG_EN]: "🔍 *Checking account status...*", [LANG_MY]: "🔍 *အကောင့်အခြေအနေ စစ်ဆေးနေသည်...*" },
-    'status_retrieving_stats': { [LANG_EN]: "🔄 *Retrieving bot statistics...*", [LANG_MY]: "🔄 *ဘော့၏ စာရင်းအင်းများ ရယူနေသည်...*" },
-    'status_broadcasting': { [LANG_EN]: "📢 *Broadcasting message to %d users (%d/%d)...*", [LANG_MY]: "📢 *သုံးစွဲသူ %d ဦးထံသို့ စာများ ပို့လွှတ်နေသည် (%d/%d)...*" },
-    'trial_success_title': { [LANG_EN]: "🎉 *Trial Account Created Successfully!*", [LANG_MY]: "🎉 *အစမ်းသုံးအကောင့် ဖန်တီးမှု အောင်မြင်ပါသည်!*" },
-    'trial_account_info_title': { [LANG_EN]: "🔍 *Your Trial Account*", [LANG_MY]: "🔍 *သင်၏ အစမ်းသုံးအကောင့်*" },
-    'field_email': { [LANG_EN]: "📧 *Email:*", [LANG_MY]: "📧 *အီးမေးလ်:*" },
-    'field_password': { [LANG_EN]: "🔑 *Password:*", [LANG_MY]: "🔑 *စကားဝှက်:*" },
-    'field_data_limit': { [LANG_EN]: "📊 *Data Limit:*", [LANG_MY]: "📊 *ဒေတာကန့်သတ်ချက်:*" },
-    'field_expiry': { [LANG_EN]: "⏰ *Expiry:*", [LANG_MY]: "⏰ *သက်တမ်း:*" },
-    'field_link': { [LANG_EN]: "🔗 *Configuration Link:*", [LANG_MY]: "🔗 *Configuration Link:*" },
-    'field_qr': { [LANG_EN]: "📱 *QR Code:*", [LANG_MY]: "📱 *QR ကုဒ်:*" },
-    'tip_copy_link': { [LANG_EN]: "💡 *Copy the link or scan QR code to use your account*", [LANG_MY]: "💡 *အကောင့်အသုံးပြုရန် လင့်ခ်ကို ကူးယူပါ သို့မဟုတ် QR ကုဒ်ကို စကင်ဖတ်ပါ။*" },
-    'field_data_usage': { [LANG_EN]: "📊 *Data Usage:*", [LANG_MY]: "📊 *ဒေတာအသုံးပြုမှု*:" },
-    'field_upload': { [LANG_EN]: "⬆️ *Upload:*", [LANG_MY]: "⬆️ *Upload:*" },
-    'field_download': { [LANG_EN]: "⬇️ *Download:*", [LANG_MY]: "⬇️ *Download:*" },
-    'field_remaining': { [LANG_EN]: "📦 *Remaining:*", [LANG_MY]: "📦 *ကျန်ရှိသော:*" },
-    'error_creation_failed': { [LANG_EN]: "❌ *Account Creation Failed*", [LANG_MY]: "❌ *အကောင့်ဖန်တီးမှု မအောင်မြင်ပါ*" },
-    'error_prefix': { [LANG_EN]: "Error:", [LANG_MY]: "အမှားအယွင်း:" },
-    'error_account_not_found': { [LANG_EN]: "❌ *Account Not Found*", [LANG_MY]: "❌ *အကောင့်ကို ရှာမတွေ့ပါ*" },
-    'tip_create_new_trial': { [LANG_EN]: "💡 *Create a new trial account using /trial command*", [LANG_MY]: "💡 *အစမ်းသုံးအကောင့်အသစ်ကို /trial command ဖြင့် ဖန်တီးနိုင်ပါသည်။*" },
-    'account_status_title': { [LANG_EN]: "📊 *Account Status*", [LANG_MY]: "📊 *အကောင့်အခြေအနေ*" },
-    'field_protocol': { [LANG_EN]: "🛡️ *Protocol:*", [LANG_MY]: "🛡️ *Protocol:*" },
-    'field_panel': { [LANG_EN]: "📡 *Panel:*", [LANG_MY]: "📡 *Panel:*" },
-    'field_status': { [LANG_EN]: "🔧 *Status:*", [LANG_MY]: "🔧 *အခြေအနေ:*" },
-    'status_active': { [LANG_EN]: "✅ Active", [LANG_MY]: "✅ အသုံးပြုနေ" },
-    'status_disabled': { [LANG_EN]: "❌ Disabled", [LANG_MY]: "❌ ပိတ်ထားသည်" },
-    'field_expiry_status': { [LANG_EN]: "⏰ *Expiry Status:*", [LANG_MY]: "⏰ *သက်တမ်းအခြေအနေ:*" },
-    'expiry_expired': { [LANG_EN]: "❌ Expired", [LANG_MY]: "❌ သက်တမ်းကုန်" },
-    'expiry_expiring_soon': { [LANG_EN]: "⚠️ Expiring Soon", [LANG_MY]: "⚠️ သက်တမ်းကုန်ခါနီး" },
-    'traffic_usage_title': { [LANG_EN]: "📈 *Traffic Usage:*", [LANG_MY]: "📈 *Traffic အသုံးပြုမှု:*" },
-    'field_total': { [LANG_EN]: "📦 Total:", [LANG_MY]: "📦 စုစုပေါင်း:" },
-    'field_used': { [LANG_EN]: "📊 Used:", [LANG_MY]: "📊 အသုံးပြုပြီး:" },
-    'field_remaining_traffic': { [LANG_EN]: "🎯 Remaining:", [LANG_MY]: "🎯 ကျန်ရှိသော:" },
-    'field_usage_percent': { [LANG_EN]: "📊 Usage:", [LANG_MY]: "📊 အသုံးပြုမှုရာခိုင်နှုန်း:" },
-    'expiry_details_title': { [LANG_EN]: "⏳ *Expiry Details:*", [LANG_MY]: "⏳ *သက်တမ်းအသေးစိတ်*:" },
-    'field_remaining_time': { [LANG_EN]: "🕒 Remaining:", [LANG_MY]: "🕒 ကျန်ရှိချိန်:" },
-    'field_expiry_date': { [LANG_EN]: "📅 Expiry Date:", [LANG_MY]: "📅 သက်တမ်းကုန်ဆုံးရက်:" },
-    'field_days_left': { [LANG_EN]: "📆 Days Left:", [LANG_MY]: "📆 ကျန်ရှိရက်များ:" },
-    'error_check_failed': { [LANG_EN]: "❌ *Account Check Failed*", [LANG_MY]: "❌ *အကောင့်စစ်ဆေးမှု မအောင်မြင်ပါ*" },
-    'tip_check_config': { [LANG_EN]: "💡 *Please check your V2Ray configuration link or email*", [LANG_MY]: "💡 *သင်၏ V2Ray configuration link သို့မဟုတ် အီးမေးလ်ကို ကျေးဇူးပြု၍ စစ်ဆေးပါ။*" },
-    'apps_select_device': { [LANG_EN]: "📱 *Please select the type of device you are using.*", [LANG_MY]: "📱 *သင်အသုံးပြုနေသော စက်အမျိုးအစားကို ရွေးချယ်ပါ။*" },
-    'apps_ios_msg': { [LANG_EN]: "📱 *Outline VPN for iOS* is available from the App Store.", [LANG_MY]: "📱 *iOS အတွက် Outline VPN* ကို App Store မှ ရရှိနိုင်ပါသည်။" },
-    'apps_android_msg': { [LANG_EN]: "🤖 *Outline VPN for Android* is available from the Google Play Store.", [LANG_MY]: "🤖 *Android အတွက် Outline VPN* ကို Google Play Store မှ ရရှိနိုင်ပါသည်။" },
-    'apps_macos_msg': { [LANG_EN]: "🍎 *Outline VPN for macOS* is available from the App Store.", [LANG_MY]: "🍎 *macOS အတွက် Outline VPN* ကို App Store မှ ရရှိနိုင်ပါသည်။" },
-    'apps_windows_msg': { [LANG_EN]: "🖥️ *Outline VPN for Windows*", [LANG_MY]: "🖥️ *Windows အတွက် Outline VPN*" },
-    'apps_windows_link_body': { [LANG_EN]: "You can get Outline VPN for Windows directly from the link below:", [LANG_MY]: "Windows အတွက် Outline VPN ကို အောက်ပါလင့်ခ်မှ တိုက်ရိုက်ရယူနိုင်ပါသည်:" },
-    'admin_access_denied': { [LANG_EN]: "❌ *Access Denied*\n\nThis command is for administrators only.", [LANG_MY]: "❌ *ခွင့်ပြုချက်မရှိပါ*\n\nဤ command သည် စီမံခန့်ခွဲသူများ (Administrators) အတွက်သာ ဖြစ်ပါသည်။" },
-    'request_usage': { [LANG_EN]: "❌ *Usage:* /request `<your message>`\n\nExample: `/request I need help with my account`", [LANG_MY]: "❌ *အသုံးပြုပုံ:* /request `<သင်၏ မက်ဆေ့ချ်>`\n\nဥပမာ: `/request ကျွန်တော့်အကောင့်အတွက် အကူအညီလိုပါတယ်`" },
-    'request_admin_sent': { [LANG_EN]: "✅ *Your request has been sent to administrators!*\n\nWe'll get back to you soon.", [LANG_MY]: "✅ *သင်၏ တောင်းဆိုချက်ကို စီမံခန့်ခွဲသူများထံ ပို့ပြီးပါပြီ။*\n\nမကြာမီ ပြန်ကြားပါမည်။" },
-    'reply_from_admin': { [LANG_EN]: "💬 *Message from Administrator*", [LANG_MY]: "💬 *စီမံခန့်ခွဲသူထံမှ မက်ဆေ့ချ်*" },
-    'reply_tip': { [LANG_EN]: "_You can reply using /request command_", [LANG_MY]: "_သင်သည် /request command ကို အသုံးပြု၍ ပြန်လည်ဖြေကြားနိုင်ပါသည်_" },
-    'reply_success_admin': { [LANG_EN]: "✅ *Message sent successfully!*", [LANG_MY]: "✅ *မက်ဆေ့ချ်ပို့ခြင်း အောင်မြင်ပါသည်!*" },
-    'reply_fail_admin': { [LANG_EN]: "❌ *Failed to send message to user!*\n\nUser might have blocked the bot.", [LANG_MY]: "❌ *သုံးစွဲသူထံသို့ မက်ဆေ့ချ်ပို့ရန် မအောင်မြင်ပါ။*\n\nသုံးစွဲသူသည် ဘော့ကို ပိတ်ထားနိုင်ပါသည်။" },
-    'admin_to': { [LANG_EN]: "👤 *To:*", [LANG_MY]: "👤 *သို့:*" },
-    'admin_message_content': { [LANG_EN]: "📝 *Message:*", [LANG_MY]: "📝 *မက်ဆေ့ချ်:*" },
-    'stats_last_updated': { [LANG_EN]: "📅 *Last Updated:*", [LANG_MY]: "📅 *နောက်ဆုံး အဆင့်မြှင့်တင်ချိန်:*" },
-    'stats_no_username': { [LANG_EN]: "No username", [LANG_MY]: "Username မရှိပါ" }, // KEEP THIS ONE
-    'broadcast_usage': { [LANG_EN]: "📢 *Broadcast Message*\n\nTo send a broadcast:\n1. Type your message (text, photo, document)\n2. Reply to that message with /broadcast", [LANG_MY]: "📢 *Broadcast မက်ဆေ့ချ်*\n\nBroadcast ပို့ရန်:\n1. မက်ဆေ့ချ် (စာ၊ ဓာတ်ပုံ၊ စာရွက်စာတမ်း) ရိုက်ထည့်ပါ။\n2. ထိုမက်ဆေ့ချ်ကို /broadcast ဖြင့် အကြောင်းပြန်ပါ။" },
-    'broadcast_complete': { [LANG_EN]: "✅ *Broadcast Completed!*", [LANG_MY]: "✅ *Broadcast လုပ်ဆောင်ခြင်း ပြီးပါပြီ!*" },
-    'broadcast_success': { [LANG_EN]: "📤 Successful:", [LANG_MY]: "📤 အောင်မြင်သူ:" },
-    'broadcast_failed': { [LANG_EN]: "❌ Failed:", [LANG_MY]: "❌ ကျရှုံးသူ:" },
-    'broadcast_total': { [LANG_EN]: "👥 Total:", [LANG_MY]: "👥 စုစုပေါင်း:" },
-    'broadcast_failed_error': { [LANG_EN]: "❌ *Broadcast Failed*", [LANG_MY]: "❌ *Broadcast မအောင်မြင်ပါ*" },
-    'status_creating_premium': { [LANG_EN]: "🔄 *Creating premium account...*", [LANG_MY]: "🔄 *Premium အကောင့် ဖန်တီးနေသည်...*" },
-    'status_deleting_premium': { [LANG_EN]: "🔄 *Deleting premium account...*", [LANG_MY]: "🔄 *Premium အကောင့် ဖျက်နေသည်...*" },
-    'status_deleting_trial': { [LANG_EN]: "🔄 *Deleting trial account...*", [LANG_MY]: "🔄 *အစမ်းသုံးအကောင့် ဖျက်နေသည်...*" },
-    'status_deleting_expired': { [LANG_EN]: "🔄 *Deleting expired %s...*", [LANG_MY]: "🔄 *သက်တမ်းကုန် %s များ ဖျက်နေသည်...*" },
-    'delete_exp_premium_type': { [LANG_EN]: "premium accounts from panel %s", [LANG_MY]: "Panel %s မှ Premium အကောင့်များ" },
-    'delete_exp_trial_type': { [LANG_EN]: "trial accounts", [LANG_MY]: "အစမ်းသုံးအကောင့်များ" },
-    'admin_usage': { [LANG_EN]: "❌ *Usage:*", [LANG_MY]: "❌ *အသုံးပြုပုံ:*" },
-    'create_success_title': { [LANG_EN]: "✅ *Premium Account Created Successfully!*", [LANG_MY]: "✅ *Premium အကောင့် ဖန်တီးမှု အောင်မြင်ပါသည်!*" },
-    'field_expiry_days': { [LANG_EN]: "⏰ *Expiry:*", [LANG_MY]: "⏰ *သက်တမ်း:*" },
-    'field_panel_id': { [LANG_EN]: "🛠️ *Panel:*", [LANG_MY]: "🛠️ *Panel:*" },
-    'delete_prem_success': { [LANG_EN]: "✅ *Premium Account Deleted Successfully!*", [LANG_MY]: "✅ *Premium အကောင့် ဖျက်သိမ်းမှု အောင်မြင်ပါသည်!*" },
-    'delete_trial_success': { [LANG_EN]: "✅ *Trial Account Deleted Successfully!*", [LANG_MY]: "✅ *အစမ်းသုံးအကောင့် ဖျက်သိမ်းမှု အောင်မြင်ပါသည်!*" },
-    'field_telegram_id': { [LANG_EN]: "🆔 *Telegram ID:*", [LANG_MY]: "🆔 *Telegram ID:*" },
-    'delete_exp_complete': { [LANG_EN]: "✅ *Expired Accounts Deletion Completed!*", [LANG_MY]: "✅ *သက်တမ်းကုန် အကောင့်များ ဖျက်သိမ်းခြင်း ပြီးပါပြီ!*" },
-    'field_deleted_type': { [LANG_EN]: "📊 *Type:*", [LANG_MY]: "📊 *အမျိုးအစား:*" },
-    'field_deleted_count': { [LANG_EN]: "✅ *Deleted:*", [LANG_MY]: "✅ *ဖျက်သိမ်းပြီး:*" },
-    'field_total_expired': { [LANG_EN]: "📋 *Total Found:*", [LANG_MY]: "📋 *စုစုပေါင်း တွေ့ရှိ:*" },
-    'field_failed_deletions': { [LANG_EN]: "❌ *Failed Deletions:*", [LANG_MY]: "❌ *ဖျက်သိမ်းမှု မအောင်မြင်သူများ:*" },
-    'field_status_result': { [LANG_EN]: "📝 *Status:*", [LANG_MY]: "📝 *အခြေအနေ:*" },
-    'error_admin_create_failed': { [LANG_EN]: "❌ *Premium Account Creation Failed*", [LANG_MY]: "❌ *Premium အကောင့် ဖန်တီးမှု မအောင်မြင်ပါ*" },
-    'error_admin_delete_failed': { [LANG_EN]: "❌ *Premium Account Deletion Failed*", [LANG_MY]: "❌ *Premium အကောင့် ဖျက်သိမ်းမှု မအောင်မြင်ပါ*" },
-    'error_admin_deltrial_failed': { [LANG_EN]: "❌ *Trial Account Deletion Failed*", [LANG_MY]: "❌ *အစမ်းသုံးအကောင့် ဖျက်သိမ်းမှု မအောင်မြင်ပါ*" },
-    'error_admin_delexp_failed': { [LANG_EN]: "❌ *Expired Accounts Deletion Failed*", [LANG_MY]: "❌ *သက်တမ်းကုန် အကောင့်များ ဖျက်သိမ်းမှု မအောင်မြင်ပါ*" },
-    'error_user_not_found': { [LANG_EN]: "❌ *User not found!*\n\nUser ID: `%s` not in database.", [LANG_MY]: "❌ *သုံးစွဲသူကို ရှာမတွေ့ပါ!* \n\nUser ID: `%s` သည် Database ထဲတွင် မရှိပါ။" },
-    'check_usage': { [LANG_EN]: "❌ *Usage:* Send a V2Ray link (vmess://, vless://, trojan://, ss://) or a subscription email/UUID directly.\n\nExample: `vmess://...` or `user@example.com`", [LANG_MY]: "❌ *အသုံးပြုပုံ:* V2Ray link (vmess://, vless://, trojan://, ss://) သို့မဟုတ် subscription email/UUID ကို တိုက်ရိုက်ပို့ပါ။\n\nဥပမာ: `vmess://...` သို့မဟုတ် `user@example.com`" },
-    'nav_next': { [LANG_EN]: "Next ➡", [LANG_MY]: "ရှေ့သို့ ➡" },
-    'nav_prev': { [LANG_EN]: "⬅ Previous", [LANG_MY]: "⬅ နောက်သို့" },
-    'nav_close': { [LANG_EN]: "⬅ Back to Menu", [LANG_MY]: "⬅ Menu သို့ ပြန်သွားရန်" },
-    'stats_title': { [LANG_EN]: "📊 *Bot Statistics Summary*", [LANG_MY]: "📊 *ဘော့၏ စာရင်းအင်း အကျဉ်းချုပ်*" },
-    'stats_total_users': { [LANG_EN]: "👥 *Total Users:*", [LANG_MY]: "👥 *စုစုပေါင်း သုံးစွဲသူ:*" },
-    'stats_top_title': { [LANG_EN]: "🏆 *Top Users (All-time) — Page %d/%d:*", [LANG_MY]: "🏆 *ထိပ်တန်း သုံးစွဲသူများ (အချိန်အားလုံး) — စာမျက်နှာ %d/%d:*" },
-    'user_id_label': { [LANG_EN]: " - User Id :", [LANG_MY]: " - User Id :" },
-};
+    if (targetUser.is_banned ?? false) {
+        await sendMessage(chatId, get_text('error_user_already_banned', lang), null, true, token);
+        return;
+    }
+
+    if (await setBanStatus(targetUserId, true, env)) {
+        await sendMessage(chatId, formatText(get_text('ban_success_admin', lang), targetName), null, true, token);
+
+        const userLang = targetUser.lang ?? DEFAULT_LANG;
+        const keyboard = {
+            inline_keyboard: [
+                [
+                    { text: get_text('button_contact_admin', userLang), url: OWNER_URL }
+                ]
+            ]
+        };
+        await sendMessage(targetUserId, get_text('user_banned_notification', userLang), keyboard, true, token);
+    } else {
+        await sendMessage(chatId, get_text('error_admin_approval_failed', lang), null, true, token);
+    }
+}
+
+/**
+ * Handle /unban command (Admin only)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleUnban(chatId, criteria, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    if (!isAdmin(chatId)) {
+        await sendMessage(chatId, get_text('admin_access_denied', lang), null, true, token);
+        return;
+    }
+
+    const targetUser = await getUserByCriteria(criteria, env);
+    if (!targetUser) {
+        await sendMessage(chatId, formatText(get_text('error_user_not_found', lang), criteria), null, true, token);
+        return;
+    }
+
+    const targetUserId = targetUser.user_id;
+    const targetName = getSafeDisplayName(targetUser); // Use safe display name
+
+    if (!(targetUser.is_banned ?? false)) {
+        await sendMessage(chatId, get_text('error_user_not_banned', lang), null, true, token);
+        return;
+    }
+
+    if (await setBanStatus(targetUserId, false, env)) {
+        await sendMessage(chatId, formatText(get_text('unban_success_admin', lang), targetName), null, true, token);
+
+        const userLang = targetUser.lang ?? DEFAULT_LANG;
+        await sendMessage(targetUserId, get_text('user_unbanned_notification', userLang), null, true, token);
+    } else {
+        await sendMessage(chatId, get_text('error_admin_approval_failed', lang), null, true, token);
+    }
+}
+
+/**
+ * Send the Access Denied message for banned users.
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleAccessDeniedBanned(chatId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    const message = get_text('access_denied_banned', lang);
+
+    const keyboard = {
+        inline_keyboard: [
+            [
+                { text: get_text('button_contact_admin', lang), url: OWNER_URL }
+            ]
+        ]
+    };
+    await sendMessage(chatId, message, keyboard, true, token);
+}
+
+/**
+ * Helper function to generate the invited by line for the welcome message.
+ * @param {Object} env Cloudflare environment object
+ */
+export async function getInvitedByLine(referrerId, lang, env) {
+    if (!referrerId) return '';
+
+    // Ensure referrerId is a clean integer
+    const finalReferrerId = cleanReferrerId(referrerId);
+    if (!finalReferrerId) return '';
+
+    const referrer = await getUserById(finalReferrerId, env);
+    if (!referrer) return '';
+
+    // Use the safe display name for the link text to prevent markdown issues (e.g., underscores)
+    const referrerNameDisplay = getSafeDisplayName(referrer);
+    const referrerLink = `[${referrerNameDisplay}](tg://user?id=${finalReferrerId})`;
+
+    // The welcome_invited_by text starts with \n, ensuring a line break.
+    return formatText(get_text('welcome_invited_by', lang), referrerLink);
+}
+
+/**
+ * Handle /start command (Main Entry Point)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleStart(chatId, username, firstName, lastName, messageId, isCallback = false, deepLink = null, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    let referrerId = null;
+
+    // 1. Check for deep link parameter (r_123456)
+    if (deepLink && deepLink.startsWith('r_')) {
+        const potentialIdString = deepLink.substring(2);
+        const potentialId = parseInt(potentialIdString);
+
+        // Ensure it is a valid number AND not the user's own ID
+        if (!isNaN(potentialId) && potentialId !== chatId) {
+            referrerId = potentialId; // Store as clean integer ID
+        }
+    }
+
+    // 2. Ensure user data is up-to-date and registered (saves referrerId permanently ONLY if first time)
+    await saveUser(chatId, username, firstName, lastName, null, referrerId, env);
+
+    const user = await getUserById(chatId, env);
+    const lang = user?.lang ?? DEFAULT_LANG;
+
+    // 3. Clear user state upon /start
+    await setUserState(chatId, 'clear', {}, env);
+
+    const fullName = (firstName + ' ' + (lastName ?? '')).trim();
+
+    let animMessageId = null;
+
+    if (!isCallback) {
+        // --- RESTORED ANIMATION LOGIC ---
+        const animText1 = "*Starting V2Ray Manager...*";
+        const animText2 = "*Generating Session Keys Please Wait...*";
+
+        // Use sendMessage initially to send the animation
+        const animMsgResult = await sendMessage(chatId, animText1, null, true, token);
+        animMessageId = animMsgResult.data?.result?.message_id;
+
+        if (animMessageId) {
+            await new Promise(r => setTimeout(r, 400));
+            await editMessageText(chatId, animMessageId, animText2, null, true, token);
+            await new Promise(r => setTimeout(r, 400));
+        }
+        // --- END RESTORED ANIMATION LOGIC ---
+    }
+
+    // 4. Generate Invited By Line
+    const invitedByLine = await getInvitedByLine(referrerId, lang, env);
+
+    // 5. Construct the Welcome Text
+    const welcomeText = formatText(get_text('welcome_start_line1', lang), fullName) +
+        invitedByLine +
+        "\n" +
+        get_text('welcome_separator', lang) + "\n" +
+        get_text('welcome_bot_desc', lang) + "\n" +
+        get_text('welcome_separator', lang) + "\n" +
+        get_text('welcome_join_prompt', lang) + "\n\n" +
+        get_text('quick_check_tip', lang);
+
+    const keyboardButtons = [
+        [
+            { text: get_text('button_main_menu', lang), callback_data: 'menu_main' },
+        ],
+        [
+            { text: get_text('button_about_me', lang), callback_data: 'menu_about' },
+            { text: get_text('button_policy_terms', lang), callback_data: 'menu_policy' },
+        ]
+    ];
+
+    const keyboard = { inline_keyboard: keyboardButtons };
+
+
+    if (isCallback) {
+        await sendOrEditMessage(chatId, welcomeText, messageId, keyboard, token);
+    } else {
+        if (animMessageId) {
+            await deleteMessage(chatId, animMessageId, token); // Delete the temp animation
+        }
+        await sendMessage(chatId, welcomeText, keyboard, true, token); // Send the final message
+    }
+}
+
+/**
+ * Helper function to format and send user info.
+ * @param {Object} env Cloudflare environment object
+ */
+export async function displayUserInfo(chatId, user, lang, header = "👨‍🦰 User Information", env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    if (!user) {
+        await sendMessage(chatId, get_text('error_account_not_found', lang), null, true, token);
+        return;
+    }
+
+    const fullName = (user.first_name + ' ' + (user.last_name ?? '')).trim();
+    // Escape underscore in username for Markdown display
+    const usernameDisplay = user.username ? `@${user.username.replace(/_/g, '\\_')}` : get_text('stats_no_username', lang);
+
+    const finalReferrerId = cleanReferrerId(user.referrer_id);
+    const referrerDisplay = finalReferrerId ? `\`${finalReferrerId}\`` : 'N/A';
+
+    const creditsDisplay = (user.credits ?? 0.0).toFixed(1);
+    const referredCount = user.referred_count ?? 0;
+
+    const message = `${header}\n━━━━━━━━━━━━━━━━\n` +
+        `๏ Full Name: ${fullName || 'N/A'}\n` +
+        `๏ Username: ${usernameDisplay}\n` +
+        `๏ User ID: \`${user.user_id}\`\n` +
+        `๏ Language: ${user.lang.toUpperCase()}\n` +
+        `๏ Banned: ${user.is_banned ? 'Yes ❌' : 'No ✅'}\n` +
+        `๏ Credits: ${creditsDisplay} 💰\n` +
+        `๏ Referred Users: ${referredCount} 👥\n` +
+        `๏ Channel Verified: ${user.channel_verified ? 'Yes ✅' : 'No ❌'}\n` +
+        `๏ Referred By: ${referrerDisplay}\n` +
+        `๏ Joined At: ${user.joined_at}`;
+
+    await sendMessage(chatId, message, null, true, token);
+}
+
+/**
+ * Handle /id <ID or USERNAME> command.
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleId(chatId, params, env) {
+    const lang = await get_user_language(chatId, env);
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+
+    const criteria = params[0];
+
+    if (!criteria || String(criteria) === String(chatId)) {
+        const user = await getUserById(chatId, env);
+        await displayUserInfo(chatId, user, lang, "👨‍🦰 User Information", env);
+        return;
+    }
+
+    if (!isAdmin(chatId)) {
+        const errorMsg = "❌ *Access Denied*\n\nThis command can only look up your own information. Use `/id` without parameters.";
+        await sendMessage(chatId, errorMsg, null, true, token);
+        return;
+    }
+
+    const targetUser = await getUserByCriteria(criteria, env);
+
+    if (!targetUser) {
+        await sendMessage(chatId, formatText(get_text('error_user_not_found', lang), criteria), null, true, token);
+        return;
+    }
+
+    await displayUserInfo(chatId, targetUser, lang, "👨‍🦰 User Information (Admin Lookup)", env);
+}
+
+
+/**
+ * Handle Premium Menu (List of Plans)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handlePremium(chatId, messageId = null, isCallback = false, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    await setUserState(chatId, 'clear', {}, env);
+
+    const message = get_text('menu_premium_title', lang) + "\n" +
+        get_text('welcome_separator', lang) + "\n" +
+        get_text('premium_select_plan', lang);
+
+    const keyboard = { inline_keyboard: [] };
+
+    let row = [];
+    for (const gb in PREMIUM_PLANS) {
+        const plan = PREMIUM_PLANS[gb];
+        const buttonText = formatText(get_text('button_plan', lang), plan.gb, plan.price);
+        row.push({ text: buttonText, callback_data: 'premium_select_' + gb });
+
+        if (row.length === 1) {
+            keyboard.inline_keyboard.push(row);
+            row = [];
+        }
+    }
+
+    if (row.length > 0) {
+        keyboard.inline_keyboard.push(row);
+    }
+
+    keyboard.inline_keyboard.push([
+        { text: get_text('button_view_plans', lang), callback_data: 'menu_premium_desc' }
+    ]);
+
+    if (isCallback) {
+        await sendOrEditMessage(chatId, message, messageId, keyboard, token);
+    } else {
+        await sendMessage(chatId, message, keyboard, true, token);
+    }
+}
+
+/**
+ * Handle Premium Plan Description Page
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handlePremiumDescription(chatId, messageId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    const message = get_text('menu_premium_desc_title', lang) + "\n" +
+        get_text('welcome_separator', lang) + "\n" +
+        get_text('menu_premium_desc_content', lang);
+
+    const keyboard = { inline_keyboard: [[
+        { text: get_text('button_back', lang), callback_data: 'menu_premium' }
+    ]]};
+
+    await sendOrEditMessage(chatId, message, messageId, keyboard, token);
+}
+
+/**
+ * Handle Plan Selection and prompt for Payment Method
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handlePremiumSelect(chatId, userId, messageId, gbLimit, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+
+    const plan = PREMIUM_PLANS[gbLimit];
+
+    if (!plan) {
+        await sendOrEditMessage(chatId, get_text('error_plan_not_found', lang), messageId, { inline_keyboard: [[{ text: get_text('button_back', lang), callback_data: 'menu_premium' }]] }, token);
+        return;
+    }
+
+    // Check if user is already waiting for TxID for ANY plan
+    const currentState = await getUserState(userId, env);
+    if (currentState?.state === 'waiting_for_txid') {
+        await sendOrEditMessage(chatId, formatText(get_text('error_already_waiting', lang), currentState.data.gb), messageId, { inline_keyboard: [[{ text: get_text('button_back', lang), callback_data: 'menu_premium' }]] }, token);
+        return;
+    }
+
+
+    await setUserState(userId, 'waiting_for_method', { gb: gbLimit, price: plan.price }, env);
+
+    const message = formatText(get_text('prompt_select_method', lang), plan.gb, plan.price);
+
+    const keyboard = {
+        inline_keyboard: [
+            [
+                { text: get_text('button_wavepay', lang), callback_data: `method_select_${gbLimit}_wavepay` },
+            ],
+            [
+                { text: get_text('button_kbzpay', lang), callback_data: `method_select_${gbLimit}_kbzpay` },
+            ],
+            [
+                { text: get_text('button_ayapay', lang), callback_data: `method_select_${gbLimit}_ayapay` },
+            ],
+            [{ text: get_text('button_back', lang), callback_data: 'menu_premium' }]
+        ]
+    };
+
+    await sendOrEditMessage(chatId, message, messageId, keyboard, token);
+}
+
+/**
+ * Handle Payment Method Selection and show Payment Instructions
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handlePaymentMethodSelect(chatId, userId, messageId, gbLimit, methodKey, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+
+    const plan = PREMIUM_PLANS[gbLimit];
+    const method = PAYMENT_METHODS[methodKey];
+
+    if (!plan || !method) {
+        await sendOrEditMessage(chatId, get_text('error_plan_not_found', lang), messageId, { inline_keyboard: [[{ text: get_text('button_back', lang), callback_data: 'menu_premium' }]] }, token);
+        return;
+    }
+
+    await setUserState(userId, 'waiting_for_txid', {
+        gb: gbLimit,
+        price: plan.price,
+        method: methodKey,
+        method_name_en: method.name_en,
+        account_name: method.account_name,
+        account_number: method.number
+    }, env);
+
+    const methodName = method[`name_${lang}`];
+    const accountName = method.account_name;
+    const accountNumber = method.number;
+
+    const paymentDetails = formatText(
+        get_text('payment_instructions_detail', lang),
+        methodName,
+        accountName,
+        accountNumber
+    );
+
+    const message = formatText(get_text('plan_details_title', lang), plan.gb, plan.price) + "\n\n" +
+        get_text('payment_instructions_title', lang) + "\n" +
+        get_text('welcome_separator', lang) + "\n" +
+        paymentDetails + "\n\n" +
+        get_text('prompt_txid', lang);
+
+    const keyboard = { inline_keyboard: [[
+        { text: get_text('button_back', lang), callback_data: 'menu_premium' }
+    ]]};
+
+    await sendOrEditMessage(chatId, message, messageId, keyboard, token);
+}
+
+/**
+ * Handle the user's text input when they are in 'waiting_for_txid' state.
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleTxidSubmission(chatId, userId, txId, state, username, firstName, lastName, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    const planData = state.data;
+    const gbLimit = planData.gb;
+    const price = planData.price;
+    const methodName = planData.method_name_en ?? 'Unknown Method';
+
+    txId = txId.trim();
+    txId = txId.replace(/[^\w\d]/g, '');
+
+    if (txId.length < 1) {
+        await sendMessage(chatId, get_text('error_no_txid', lang), null, true, token);
+        return;
+    }
+
+    const userMessage = formatText(get_text('txid_submitted_user', lang), txId);
+    await sendMessage(chatId, userMessage, null, true, token); // Send final confirmation to user
+
+    await setUserState(userId, 'clear', {}, env);
+
+    const fullName = (firstName + ' ' + (lastName ?? '')).trim();
+    // Escape underscore in username for Admin message display
+    const usernameDisplay = username ? `@${username.replace(/_/g, '\\_')}` : "N/A";
+    const adminTime = formatText(get_text('admin_field_time', DEFAULT_LANG), Date.now() / 1000);
+
+    const adminMessage = get_text('admin_new_purchase', DEFAULT_LANG) + "\n\n" +
+        get_text('admin_field_method', DEFAULT_LANG) + ` ${methodName}\n` +
+        get_text('admin_field_txid', DEFAULT_LANG) + ` \`${txId}\`\n` +
+        get_text('admin_field_userid', DEFAULT_LANG) + ` \`${userId}\`\n` +
+        get_text('admin_field_time', DEFAULT_LANG) + ` ${adminTime}\n` +
+        get_text('welcome_separator', DEFAULT_LANG) + "\n\n" +
+        `👤 *User:* [${fullName}](tg://user?id=${userId})\n` +
+        `📧 *UserName:* ${usernameDisplay}\n` +
+        `💰 *Plan:* ${gbLimit}GB (${price})\n\n` +
+        `Use \`/approve ${userId} ${gbLimit}\` or \`/reject ${userId}\` to proceed.`;
+
+    const keyboard = {
+        inline_keyboard: [
+            [
+                { text: formatText(get_text('admin_approve_btn', DEFAULT_LANG), gbLimit), callback_data: `admin_approve_${userId}_${gbLimit}` },
+            ],
+            [
+                { text: get_text('admin_reject_btn', DEFAULT_LANG), callback_data: `admin_reject_${userId}` }
+            ]
+        ]
+    };
+
+    for (const adminId of ADMIN_IDS) {
+        await sendMessage(adminId, adminMessage, keyboard, true, token);
+    }
+}
+
+/**
+ * Handle Admin Approval and Account Creation
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleAdminApprove(chatId, targetUserId, gbLimit, messageId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const adminLang = await get_user_language(chatId, env);
+
+    if (!isAdmin(chatId)) {
+        await sendMessage(chatId, get_text('admin_access_denied', adminLang), null, true, token);
+        return;
+    }
+
+    const user = await getUserById(targetUserId, env);
+    const plan = PREMIUM_PLANS[gbLimit];
+
+    if (!user || (!plan && gbLimit !== PREMIUM_CREDIT_PLANS[5]?.gb && gbLimit !== PREMIUM_CREDIT_PLANS[10]?.gb && gbLimit < 100)) {
+        await sendMessage(chatId, get_text('error_admin_approval_failed', adminLang) + "\nInvalid User ID or Plan.", null, true, token);
+        if (messageId) { await editMessageText(chatId, messageId, "*✅ Approved (Error: User/Plan not found)*", { inline_keyboard: [] }, true, token); }
+        return;
+    }
+
+    const premiumAccountName = generateRandomKey(12);
+
+    const startingMessage = `🔄 *Creating Premium Account:* \`${premiumAccountName}\` for user \`${targetUserId}\`...`;
+    // If command is inline, edit the inline message; otherwise, send a new one.
+    const initialMsg = await sendMessage(chatId, startingMessage, null, true, token);
+    const loadingMessageId = messageId ?? initialMsg.data?.result?.message_id;
+    if (messageId && loadingMessageId !== messageId) {
+        // If inline command, edit the original callback message, then send new final messages.
+        await editMessageText(chatId, messageId, startingMessage, { inline_keyboard: [] }, true, token);
+    }
+
+
+    const result = await createPremiumAccount(gbLimit, premiumAccountName, PREMIUM_DEFAULT_DAYS, PREMIUM_PANEL_ID);
+
+    if (result.success) {
+        await savePremiumKey(targetUserId, premiumAccountName, env);
+
+        const data = result.data;
+        const userLang = user.lang ?? DEFAULT_LANG;
+
+        const panelNameDisplay = SERVER_NAMES[PREMIUM_PANEL_ID] ?? `Panel ${PREMIUM_PANEL_ID}`;
+
+        const messageToUser = formatText(get_text('approval_success_user', userLang), gbLimit) + "\n\n" +
+            get_text('field_account_name', userLang) + ` \`${premiumAccountName}\`\n` +
+            get_text('field_email', userLang) + ` \`${data.email}\`\n` +
+            get_text('field_password', userLang) + ` \`${data.password}\`\n` +
+            get_text('field_data_limit', userLang) + ` ${gbLimit} GB\n` +
+            get_text('field_expiry_days', userLang) + ` ${PREMIUM_DEFAULT_DAYS} days\n` +
+            get_text('field_panel_id', userLang) + ` ${panelNameDisplay}\n\n` +
+            get_text('field_link', userLang) + `\`\`\`${data.link}\`\`\`\n\n` +
+            get_text('field_qr', userLang) + `\n${data.qr_code}`;
+
+        await sendMessage(targetUserId, messageToUser, null, true, token);
+
+        const adminConfirm = get_text('create_success_title', adminLang) + "\n\n" +
+            get_text('field_account_name', adminLang) + ` \`${premiumAccountName}\`\n` +
+            get_text('field_telegram_id', adminLang) + ` \`${targetUserId}\`\n` +
+            get_text('field_data_limit', adminLang) + ` ${gbLimit} GB\n` +
+            get_text('field_panel_id', adminLang) + ` ${panelNameDisplay}`;
+
+        // Final message to admin, editing the loading message
+        await sendOrEditMessage(chatId, adminConfirm, loadingMessageId, null, token);
+
+    } else {
+        const errorMessage = get_text('error_admin_create_failed', adminLang) + "\n\n" +
+            get_text('error_prefix', adminLang) + ` \`${result.error}\` (User: ${targetUserId})`;
+        // Final message to admin, editing the loading message
+        await sendOrEditMessage(chatId, errorMessage, loadingMessageId, null, token);
+    }
+}
+
+/**
+ * Handle Admin Rejection
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleAdminReject(chatId, targetUserId, messageId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const adminLang = await get_user_language(chatId, env);
+
+    if (!isAdmin(chatId)) {
+        await sendMessage(chatId, get_text('admin_access_denied', adminLang), null, true, token);
+        return;
+    }
+
+    const user = await getUserById(targetUserId, env);
+
+    if (!user) {
+        await sendMessage(chatId, formatText(get_text('error_user_not_found', adminLang), targetUserId), null, true, token);
+        if (messageId) { await editMessageText(chatId, messageId, "*❌ Rejected (Error: User not found)*", { inline_keyboard: [] }, true, token); }
+        return;
+    }
+
+    if (messageId) { await editMessageText(chatId, messageId, `*❌ Rejected: User ${targetUserId}*`, { inline_keyboard: [] }, true, token); }
+
+    const userLang = user.lang ?? DEFAULT_LANG;
+    const txId = 'N/A';
+    const messageToUser = formatText(get_text('approval_rejected_user', userLang), txId);
+
+    await sendMessage(targetUserId, messageToUser, null, true, token);
+
+    const adminConfirm = formatText(get_text('admin_rejection_done', adminLang), targetUserId);
+    await sendMessage(chatId, adminConfirm, null, true, token);
+}
+
+/**
+ * Handle Main Menu (List of User Commands)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleMainMenu(chatId, messageId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+
+    const message = get_text('menu_main_title', lang) + "\n\n" +
+        get_text('cmd_premium', lang) + "\n" +
+        get_text('cmd_referral', lang) + "\n" +
+        get_text('cmd_trial', lang) + "\n" +
+        get_text('cmd_mytrial', lang) + "\n" +
+        get_text('cmd_apps', lang) + "\n" +
+        get_text('cmd_id', lang) + "\n" +
+        get_text('cmd_language', lang) + "\n" +
+        get_text('cmd_help', lang);
+
+    const keyboard = {
+        inline_keyboard: [
+            [
+                { text: get_text('button_back_to_start', lang), callback_data: 'menu_start' }
+            ]
+        ]
+    };
+
+    await sendOrEditMessage(chatId, message, messageId, keyboard, token);
+}
+
+/**
+ * Handle About Me Menu.
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleAboutMe(chatId, messageId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+
+    const message = get_text('about_name', lang) + "\n" +
+        get_text('about_version', lang) + "\n\n" +
+        get_text('about_dev_team', lang) + "\n" +
+        get_text('about_creator', lang) + "\n\n" +
+        get_text('about_tech_stack', lang) + "\n" +
+        get_text('about_language', lang) + "\n" +
+        get_text('about_database', lang) + "\n" +
+        get_text('about_hosting', lang) + "\n\n" +
+        get_text('about_main_desc', lang);
+
+    const keyboard = {
+        inline_keyboard: [
+            [
+                { text: get_text('button_stats_about', lang), callback_data: 'menu_stats_btn' },
+                { text: get_text('button_server_info', lang), callback_data: 'menu_server_btn' }
+            ],
+            [
+                { text: get_text('button_back_to_start', lang), callback_data: 'menu_start' }
+            ]
+        ]
+    };
+
+    await sendOrEditMessage(chatId, message, messageId, keyboard, token);
+}
+
+/**
+ * Handle Server Info Menu (Updated to fetch real-time stats).
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleServerInfo(chatId, messageId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+
+    // 1. Initial message (Loading)
+    const initialMsg = await sendOrEditMessage(chatId, get_text('server_info_title', lang) + "\n━━━━━━━━━━━━━━━━━━━━━━\n\n*🔄 Fetching real-time panel stats...*", messageId, null, token);
+    const loadingMessageId = initialMsg.data?.result?.message_id ?? messageId;
+
+    // 2. Fetch Stats
+    const statsResult = await getPanelStats();
+    let onlineCount = 0;
+    let totalCount = 0;
+    let panelStatusMessage = "";
+    let statusMessage = get_text('server_info_content', lang);
+
+    if (statsResult.success) {
+        const stats = statsResult.data;
+        const panelStatus = stats.panel_status ?? {};
+        totalCount = stats.total_panels ?? 0;
+
+        // @ts-ignore
+        const panelNames = Object.keys(panelStatus).sort();
+
+        // Count online panels and format status message for Admin context (optional detail)
+        for (const status of Object.values(panelStatus)) {
+            if (status === 'online') {
+                onlineCount++;
+            }
+        }
+
+        const onlineCountLine = formatText(get_text('server_info_online_panels', lang), onlineCount, totalCount);
+
+        // Replace the placeholder line in the main content
+        statusMessage = get_text('server_info_content', lang)
+            .replace(/• \*Online Panels:\* (\d+)(.+?)/, onlineCountLine);
+
+    } else {
+        const errorMsg = statsResult.error ?? 'API connection failed';
+        panelStatusMessage = "\n\n" + formatText(get_text('server_info_api_error', lang), errorMsg);
+        statusMessage = get_text('server_info_content', lang);
+
+        // Add a placeholder for online count on error
+        statusMessage = statusMessage.replace(/• \*Online Panels:\* (\d+)(.+?)/, '• *Online Panels:* N/A / N/A');
+    }
+
+    // 3. Construct final message
+    const finalMessage = get_text('server_info_title', lang) + "\n━━━━━━━━━━━━━━━━━━━━━━\n\n" +
+        statusMessage +
+        panelStatusMessage;
+
+    const keyboard = {
+        inline_keyboard: [
+            [
+                { text: get_text('button_back', lang), callback_data: 'menu_about' }
+            ]
+        ]
+    };
+
+    await sendOrEditMessage(chatId, finalMessage, loadingMessageId, keyboard, token);
+}
+
+/**
+ * Handle Policy & Terms Menu.
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handlePolicyTerms(chatId, messageId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    const message = get_text('menu_policy_content', lang);
+
+    const keyboard = {
+        inline_keyboard: [
+            [
+                { text: get_text('button_back_to_start', lang), callback_data: 'menu_start' }
+            ]
+        ]
+    };
+
+    await sendOrEditMessage(chatId, message, messageId, keyboard, token);
+}
+
+/**
+ * Handle /language command.
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleLanguage(chatId, messageId = null, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    const message = get_text('lang_select_title', lang);
+
+    const keyboard = {
+        inline_keyboard: [
+            [
+                { text: get_text('lang_button_en', LANG_EN), callback_data: 'set_lang_' + LANG_EN },
+                { text: get_text('lang_button_my', LANG_MY), callback_data: 'set_lang_' + LANG_MY }
+            ]
+        ]
+    };
+
+    await sendOrEditMessage(chatId, message, messageId, keyboard, token);
+}
+
+/**
+ * Handle setting the new language.
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleSetLanguage(chatId, userId, langCode, messageId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    if (langCode !== LANG_EN && langCode !== LANG_MY) {
+        return;
+    }
+
+    await setUserLanguage(userId, langCode, env);
+
+    const langNameKey = 'lang_name_' + langCode;
+    const langName = get_text(langNameKey, langCode);
+
+    const confirmation = formatText(get_text('lang_confirmed', langCode), langName);
+
+    await sendOrEditMessage(chatId, confirmation, messageId, null, token);
+}
+
+// --- App Handlers ---
+
+/**
+ * Handle iOS apps
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleAppsIos(chatId, messageId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    let message = get_text('apps_ios_msg', lang) + "\n\n";
+    message += "https://apps.apple.com/app/outline-app/id1356177741";
+
+    const keyboard = { inline_keyboard: [[
+        { text: get_text('button_back', lang), callback_data: 'apps_back' }
+    ]]};
+
+    await sendOrEditMessage(chatId, message, messageId, keyboard, token);
+}
+
+/**
+ * Handle Android apps
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleAppsAndroid(chatId, messageId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    let message = get_text('apps_android_msg', lang) + "\n\n";
+    message += "https://play.google.com/store/apps/details?id=org.outline.android.client";
+
+    const keyboard = { inline_keyboard: [[
+        { text: get_text('button_back', lang), callback_data: 'apps_back' }
+    ]]};
+
+    await sendOrEditMessage(chatId, message, messageId, keyboard, token);
+}
+
+/**
+ * Handle macOS apps
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleAppsMacos(chatId, messageId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    let message = get_text('apps_macos_msg', lang) + "\n\n";
+    message += "https://apps.apple.com/us/app/outline-secure-internet-access/id1356178125";
+
+    const keyboard = { inline_keyboard: [[
+        { text: get_text('button_back', lang), callback_data: 'apps_back' }
+    ]]};
+
+    await sendOrEditMessage(chatId, message, messageId, keyboard, token);
+}
+
+/**
+ * Handle Windows apps
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleAppsWindows(chatId, messageId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    let message = get_text('apps_windows_msg', lang) + "\n\n";
+    message += get_text('apps_windows_link_body', lang) + "\n\n";
+    message += "https://t.me/Channel404Community/2";
+
+    const keyboard = { inline_keyboard: [[
+        { text: get_text('button_back', lang), callback_data: 'apps_back' }
+    ]]};
+
+    await sendOrEditMessage(chatId, message, messageId, keyboard, token);
+}
+
+/**
+ * Handle /apps command
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleApps(chatId, messageId = null, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    const message = get_text('apps_select_device', lang);
+
+    const keyboard = {
+        inline_keyboard: [
+            [
+                { text: '📱 iOS', callback_data: 'apps_ios' },
+                { text: '🤖 Android', callback_data: 'apps_android' }
+            ],
+            [
+                { text: '🖥️ Windows', callback_data: 'apps_windows' },
+                { text: '🍎 macOS', callback_data: 'apps_macos' }
+            ]
+        ]
+    };
+
+    await sendOrEditMessage(chatId, message, messageId, keyboard, token);
+}
+
+/**
+ * Handle /referral command and menu (UPDATED)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleReferral(chatId, userId, messageId = null, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    const user = await getUserById(userId, env);
+    const credits = (user?.credits ?? 0.0).toFixed(1);
+    const referredCount = user?.referred_count ?? 0;
+
+    const referralLink = `https://t.me/${BOT_USERNAME}?start=r_${userId}`;
+    const referralLinkForDisplay = `\`${referralLink}\``;
+
+    const description = formatText(get_text('referral_desc', lang), REFERRAL_REWARD);
+
+    const message = get_text('menu_referral_title', lang) + "\n" +
+        get_text('welcome_separator', lang) + "\n\n" +
+        description + "\n\n" +
+        get_text('field_your_credits', lang) + ` ${credits}\n` +
+        get_text('field_referred_count', lang) + ` ${referredCount}\n\n` +
+        get_text('field_your_link', lang) + referralLinkForDisplay;
+
+    // Fix: Change redemption buttons to be in separate rows (vertical layout)
+    const keyboard = {
+        inline_keyboard: [
+            [ // Separate row for 5GB
+                {
+                    text: formatText(get_text('button_redeem_5gb', lang), PREMIUM_CREDIT_PLANS[5].cost),
+                    callback_data: 'redeem_5gb'
+                }
+            ],
+            [ // Separate row for 10GB
+                {
+                    text: formatText(get_text('button_redeem_10gb', lang), PREMIUM_CREDIT_PLANS[10].cost),
+                    callback_data: 'redeem_10gb'
+                }
+            ],
+            [ // NEW: Custom Redemption
+                { text: get_text('button_redeem_custom', lang), callback_data: 'redeem_custom_prompt' }
+            ],
+            [ // NEW: Key Management and History
+                { text: get_text('button_view_my_keys', lang), callback_data: 'view_my_keys_page_1' },
+            ],
+            [
+                { text: get_text('button_credit_history', lang), callback_data: 'show_credit_history' },
+                { text: get_text('button_verify_join', lang), callback_data: 'verify_channel_join' }
+            ]
+        ]
+    };
+
+    await sendOrEditMessage(chatId, message, messageId, keyboard, token);
+}
+
+/**
+ * Handle Credit History display.
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleCreditHistory(chatId, messageId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    const user = await getUserById(chatId, env);
+    const history = user?.credit_history ?? [];
+
+    let message = get_text('menu_credit_history_title', lang) + "\n" +
+        get_text('welcome_separator', lang) + "\n\n";
+
+    if (history.length === 0) {
+        message += get_text('credit_history_empty', lang);
+    } else {
+        // Display last 10 transactions, reversed (newest first)
+        const displayHistory = history.slice(-10).reverse();
+
+        for (const entry of displayHistory) {
+            const operationKey = entry.operation === 'add' ? 'credit_history_entry_add' : 'credit_history_entry_deduct';
+
+            // Format source for display
+            let sourceText = entry.source;
+            if (typeof entry.source === 'string' && entry.source.startsWith('Redeem')) {
+                // If the source is 'Redeem 5GB', extract 5
+                const gbMatch = entry.source.match(/Redeem (\d+)GB/);
+                const gb = gbMatch ? parseInt(gbMatch[1]) : 0;
+                sourceText = formatText(get_text('credit_source_redeem', lang), gb);
+            } else if (entry.source === 'Admin Add') {
+                sourceText = get_text('credit_source_admin_add', lang);
+            } else if (entry.source === 'Admin Deduct') {
+                sourceText = get_text('credit_source_admin_deduct', lang);
+            }
+            // For referral source, the string already contains the user link, so use it directly.
+
+            message += formatText(get_text(operationKey, lang), entry.amount, sourceText, entry.timestamp) + "\n";
+        }
+        message += "\n_Showing last " + Math.min(10, history.length) + " transactions._";
+    }
+
+    const keyboard = { inline_keyboard: [[
+        { text: get_text('button_back', lang), callback_data: 'referral_back' }
+    ]]};
+
+    await sendOrEditMessage(chatId, message, messageId, keyboard, token);
+}
+
+/**
+ * Handle Channel Join verification and credit reward (UPDATED)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleVerifyJoin(chatId, userId, messageId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    const user = await getUserById(userId, env);
+
+    const isMember = await checkChannelMembership(userId, CHANNEL_ID, token);
+    const alreadyVerified = user?.channel_verified ?? false;
+
+    if (isMember) {
+        if (!alreadyVerified) {
+            // Set verified status and log 'no change' transaction, just to log verification.
+            const source = "Channel Verification";
+            // @ts-ignore
+            const { success } = await setCredits(userId, 0, 'add', true, source, env);
+
+            // Award referral credit to referrer if applicable
+            const awardResult = await awardReferralCreditOnVerify(userId, env);
+
+            if (awardResult.success) {
+                // Since db.js now returns the message, send it here.
+                await sendMessage(awardResult.referrerId, awardResult.message, null, true, token);
+            }
+        }
+
+        const confirmationMessage = get_text('status_already_joined', lang);
+        await sendOrEditMessage(chatId, confirmationMessage, messageId, { inline_keyboard: [[{ text: get_text('button_back', lang), callback_data: 'referral_back' }]] }, token);
+    } else {
+        const message = get_text('join_channel_prompt', lang);
+        const keyboard = {
+            inline_keyboard: [
+                [
+                    { text: get_text('button_channel_link', lang), url: CHANNEL_URL }
+                ],
+                [
+                    { text: get_text('button_verify_join', lang), callback_data: 'verify_channel_join' }
+                ],
+                [
+                    { text: get_text('button_back', lang), callback_data: 'referral_back' }
+                ]
+            ]
+        };
+        await sendOrEditMessage(chatId, get_text('status_not_joined', lang) + "\n\n" + message, messageId, keyboard, token);
+    }
+}
+
+/**
+ * NEW: Handle selection of a panel for credit redemption
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleRedeemSelectPanel(chatId, userId, messageId, gbLimit, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    const user = await getUserById(userId, env);
+
+    const requiredCost = parseFloat((gbLimit * CREDIT_COST_PER_GB).toFixed(1));
+
+    // 1. Pre-checks (needed if coming from /redeem command directly without checks)
+    if ((user?.credits ?? 0) < requiredCost) {
+        const errorMsg = formatText(get_text('error_insufficient_credits', lang), requiredCost);
+        await sendOrEditMessage(chatId, errorMsg, messageId, { inline_keyboard: [[{ text: get_text('button_back', lang), callback_data: 'referral_back' }]] }, token);
+        return;
+    }
+
+    if (!user?.channel_verified) {
+        await sendOrEditMessage(chatId, get_text('error_unverified_redeem', lang), messageId, { inline_keyboard: [[{ text: get_text('button_back', lang), callback_data: 'referral_back' }]] }, token);
+        return;
+    }
+
+    // 2. Set state for panel selection
+    await setUserState(userId, 'waiting_for_redeem_panel', { gb: gbLimit, cost: requiredCost }, env);
+
+    const message = formatText(get_text('prompt_select_panel', lang), gbLimit);
+
+    // 3. Generate dynamic keyboard based on SERVER_NAMES
+    const keyboardButtons = [];
+    for (const panelId in SERVER_NAMES) {
+        const panelName = SERVER_NAMES[panelId];
+        keyboardButtons.push([{
+            text: formatText(get_text('panel_button_name', lang), panelName),
+            callback_data: `redeem_panel_final_${gbLimit}_${requiredCost}_${panelId}`
+        }]);
+    }
+
+    keyboardButtons.push([{ text: get_text('button_back', lang), callback_data: 'referral_back' }]);
+
+    const keyboard = { inline_keyboard: keyboardButtons };
+
+    await sendOrEditMessage(chatId, message, messageId, keyboard, token);
+}
+
+/**
+ * NEW: Handle Credit Redemption Final Step after Panel Selection.
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleRedeemPanelSelect(chatId, userId, messageId, gbLimit, cost, panel, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+
+    // Clear state
+    await setUserState(userId, 'clear', {}, env);
+
+    // 1. Show loading state by editing the button message
+    await editMessageText(chatId, messageId, formatText(get_text('status_redeeming', lang), gbLimit), null, true, token);
+
+    const premiumAccountName = generateRandomKey(12);
+
+    // 2. Call API to create account
+    const result = await createPremiumAccount(gbLimit, premiumAccountName, PREMIUM_DEFAULT_DAYS, panel);
+    const panelNameDisplay = SERVER_NAMES[panel] ?? `Panel ${panel}`;
+
+    if (result.success) {
+        const source = `Redeem ${gbLimit}GB`;
+        // @ts-ignore
+        const { success: creditSuccess } = await setCredits(userId, cost, 'deduct', false, source, env);
+        await saveUserRedeemedKey(userId, premiumAccountName, gbLimit, panel, env); // NEW: Save the redeemed key
+
+        const data = result.data;
+
+        const message = formatText(get_text('redeem_success_user', lang), gbLimit, panelNameDisplay, cost) + "\n\n" +
+            get_text('field_redeemed_account', lang) + "\n" +
+            get_text('field_account_name', lang) + ` \`${premiumAccountName}\`\n` +
+            get_text('field_data_limit', lang) + ` ${gbLimit} GB\n` +
+            get_text('field_expiry_days', lang) + ` ${PREMIUM_DEFAULT_DAYS} days\n` +
+            get_text('field_panel_name', lang) + ` ${panelNameDisplay}\n\n` +
+            get_text('field_link', lang) + `\`\`\`${data.link}\`\`\`\n\n` +
+            get_text('field_qr', lang) + `\n${data.qr_code}`;
+
+        const keyboard = { inline_keyboard: [[{ text: get_text('button_back', lang), callback_data: 'referral_back' }]] };
+        await sendOrEditMessage(chatId, message, messageId, keyboard, token);
+
+    } else {
+        const errorMessage = get_text('error_creation_failed', lang) + "\n\n" +
+            get_text('error_prefix', lang) + ` \`${result.error}\`\n\n` +
+            "_No credits were deducted due to API failure._";
+        await sendOrEditMessage(chatId, errorMessage, messageId, { inline_keyboard: [[{ text: get_text('button_back', lang), callback_data: 'referral_back' }]] }, token);
+    }
+}
+
+/**
+ * Handle custom GB redemption prompt (set state).
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleCustomRedeemPrompt(chatId, userId, messageId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+
+    // Set state to await custom GB amount
+    await setUserState(userId, 'waiting_for_custom_gb', { messageId: messageId }, env);
+
+    const message = formatText(get_text('prompt_redeem_custom_gb', lang), CREDIT_COST_PER_GB);
+
+    const keyboard = { inline_keyboard: [[
+        { text: get_text('button_back', lang), callback_data: 'referral_back' }
+    ]]};
+
+    await sendOrEditMessage(chatId, message, messageId, keyboard, token);
+}
+
+/**
+ * Handle user's text input when in 'waiting_for_custom_gb' state (Pre-Panel Select)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleCustomGbRedemptionInput(chatId, userId, gbAmountText, messageId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+
+    // 1. Validate input
+    const gbAmount = parseInt(gbAmountText.trim());
+
+    if (isNaN(gbAmount) || gbAmount < 1) {
+        await sendMessage(chatId, get_text('error_invalid_gb_amount', lang), null, true, token);
+        await handleCustomRedeemPrompt(chatId, userId, null, env); // Re-prompt
+        return;
+    }
+
+    const user = await getUserById(userId, env);
+    const requiredCost = parseFloat((gbAmount * CREDIT_COST_PER_GB).toFixed(1));
+
+    // 2. Check credits and verification
+    if ((user?.credits ?? 0) < requiredCost) {
+        const errorMsg = formatText(get_text('error_insufficient_credits_custom', lang), gbAmount, requiredCost);
+        await sendMessage(chatId, errorMsg, null, true, token);
+        await handleCustomRedeemPrompt(chatId, userId, null, env); // Re-prompt
+        return;
+    }
+
+    if (!user?.channel_verified) {
+        await sendMessage(chatId, get_text('error_unverified_redeem', lang), null, true, token);
+        await setUserState(userId, 'clear', {}, env);
+        return;
+    }
+
+    // 3. Proceed to Panel Selection (Clearing state is handled in the next step to allow back button)
+    // NOTE: Send a new message to prompt for panel selection, the input message remains untouched.
+    await handleRedeemSelectPanel(chatId, userId, null, gbAmount, env);
+}
+
+/**
+ * NEW: Handle Paginated Display of Redeemed Keys
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleMyRedeemedKeys(chatId, userId, messageId, page, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    const allKeys = await getUserRedeemedKeys(userId, env);
+
+    if (allKeys.length === 0) {
+        const message = get_text('menu_my_keys_title', lang) + "\n" + get_text('welcome_separator', lang) + "\n\n" + get_text('no_redeemed_keys', lang);
+        const keyboard = { inline_keyboard: [[{ text: get_text('button_back', lang), callback_data: 'referral_back' }]] };
+        await sendOrEditMessage(chatId, message, messageId, keyboard, token);
+        return;
+    }
+
+    const totalKeys = allKeys.length;
+    const totalPages = Math.ceil(totalKeys / REDEEMED_KEYS_PER_PAGE);
+    page = Math.max(1, Math.min(page, totalPages));
+    const offset = (page - 1) * REDEEMED_KEYS_PER_PAGE;
+
+    // Sort newest key first
+    const sortedKeys = allKeys.sort((a, b) => new Date(b.redeemed_at).getTime() - new Date(a.redeemed_at).getTime());
+    const currentPageKeys = sortedKeys.slice(offset, offset + REDEEMED_KEYS_PER_PAGE);
+
+    let message = get_text('menu_my_keys_title', lang) + "\n" +
+        get_text('welcome_separator', lang) + "\n\n" +
+        `*Page ${page}/${totalPages}*\n\n`;
+
+    const keyboardButtons = [];
+
+    currentPageKeys.forEach((keyData, index) => {
+        const globalIndex = offset + index + 1;
+        const panel = keyData.panel;
+        const panelName = SERVER_NAMES[panel] ?? `Panel ${panel}`;
+
+        message += `*${globalIndex}.* ${keyData.gb}GB on ${panelName}\n`;
+        message += get_text('field_account_key', lang) + ` \`${keyData.key}\`\n`;
+        message += get_text('field_key_date', lang) + ` ${keyData.redeemed_at}\n\n`;
+
+        // Create delete button text with key snippet
+        const keySnippet = keyData.key.length > 10 ? keyData.key.substring(0, 6) + '...' + keyData.key.slice(-4) : keyData.key;
+        const deleteButtonText = formatText(get_text('button_delete_key', lang), keySnippet);
+
+        keyboardButtons.push([{
+            text: deleteButtonText, // This will be "🗑️ ကီး ဖျက်ရန်: keyName..."
+            callback_data: `key_delete_confirm_${keyData.key}_${panel}`
+        }]);
+    });
+
+    const navRow = [];
+    if (page > 1) {
+        navRow.push({ text: get_text('nav_key_prev', lang), callback_data: `view_my_keys_page_${page - 1}` });
+    }
+    if (page < totalPages) {
+        navRow.push({ text: get_text('nav_key_next', lang), callback_data: `view_my_keys_page_${page + 1}` });
+    }
+    if (navRow.length > 0) {
+        keyboardButtons.push(navRow);
+    }
+
+    keyboardButtons.push([{ text: get_text('button_back', lang), callback_data: 'referral_back' }]);
+
+    const keyboard = { inline_keyboard: keyboardButtons };
+
+    await sendOrEditMessage(chatId, message, messageId, keyboard, token);
+}
+
+/**
+ * NEW: Handle Key Deletion Confirmation
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleKeyDeleteConfirm(chatId, userId, messageId, key, panel, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    const keys = await getUserRedeemedKeys(userId, env);
+    // Key is a string, panel might be stored as string or number, so use flexible comparison
+    const keyData = keys.find(k => k.key === key && String(k.panel) === String(panel));
+
+    if (!keyData) {
+        await sendOrEditMessage(chatId, get_text('error_key_not_found', lang), messageId, { inline_keyboard: [[{ text: get_text('button_back', lang), callback_data: 'view_my_keys_page_1' }]] }, token);
+        return;
+    }
+
+    const panelName = SERVER_NAMES[panel] ?? `Panel ${panel}`;
+
+    const message = formatText(get_text('confirm_delete_key', lang), key, panelName);
+
+    const keyboard = {
+        inline_keyboard: [
+            [
+                { text: `✅ Yes, Delete`, callback_data: `key_delete_final_${key}_${panel}` },
+                { text: `❌ Cancel`, callback_data: 'view_my_keys_page_1' }
+            ]
+        ]
+    };
+
+    await sendOrEditMessage(chatId, message, messageId, keyboard, token);
+}
+
+/**
+ * NEW: Handle Key Deletion Finalization
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleKeyDeleteFinal(chatId, userId, messageId, key, panel, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    await editMessageText(chatId, messageId, `🔄 *Deleting key* \`${key}\` *from Panel ${panel}...*`, null, true, token);
+
+    // 1. Attempt to delete from V2Ray API
+    const deleteResult = await deletePremiumAccount(key, panel);
+
+    if (deleteResult.success) {
+        // 2. If API success, delete from local KV storage
+        await deleteUserRedeemedKey(userId, key, env);
+
+        const panelName = SERVER_NAMES[panel] ?? `Panel ${panel}`;
+        const message = formatText(get_text('key_deleted_success', lang), key, panelName);
+        await sendOrEditMessage(chatId, message, messageId, { inline_keyboard: [[{ text: get_text('button_back', lang), callback_data: 'view_my_keys_page_1' }]] }, token);
+    } else {
+        // 3. If API fails, notify user but do NOT delete from local KV 
+        const errorMessage = formatText(get_text('key_delete_fail', lang), key, deleteResult.error);
+        await sendOrEditMessage(chatId, errorMessage, messageId, { inline_keyboard: [[{ text: get_text('button_back', lang), callback_data: 'view_my_keys_page_1' }]] }, token);
+    }
+}
+
+
+// --- /create (Admin) Flow Handlers ---
+
+/**
+ * Handle /create command (Admin only) - Pre-step: Panel Select Prompt
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleCreate(chatId, params, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    if (!isAdmin(chatId)) {
+        await sendMessage(chatId, get_text('admin_access_denied', lang), null, true, token);
+        return;
+    }
+
+    if (params.length < 3 || isNaN(parseFloat(params[0])) || !params[1] || isNaN(parseInt(params[2]))) {
+        await sendMessage(chatId, get_text('admin_usage', lang) + " " + get_text('cmd_create', lang), null, true, token);
+        return;
+    }
+
+    const gbLimit = parseFloat(params[0]);
+    const userName = params[1];
+    const daysLimit = parseInt(params[2]);
+    const panel = parseInt(params[3]); // Optional
+
+    // If panel is provided and valid, run the creation directly (backward compatibility)
+    if (panel && !isNaN(panel) && panel > 0) {
+        await finalizeAdminCreate(chatId, gbLimit, userName, daysLimit, panel, null, env);
+        return;
+    }
+
+    // If panel is NOT provided or invalid, prompt for panel selection
+    const message = formatText(get_text('prompt_select_panel_create', lang), userName, gbLimit);
+
+    // Set state to await panel selection
+    await setUserState(chatId, 'waiting_for_create_panel', { gb: gbLimit, name: userName, days: daysLimit }, env);
+
+    const keyboardButtons = [];
+    for (const panelId in SERVER_NAMES) {
+        const panelName = SERVER_NAMES[panelId];
+        keyboardButtons.push([{
+            text: formatText(get_text('panel_button_name', lang), panelName),
+            callback_data: `admin_create_panel_${panelId}_${gbLimit}_${daysLimit}_${userName}`
+        }]);
+    }
+
+    keyboardButtons.push([{ text: get_text('button_back', lang), callback_data: 'menu_admin' }]);
+    const keyboard = { inline_keyboard: keyboardButtons };
+
+
+    await sendMessage(chatId, message, keyboard, true, token);
+}
+
+/**
+ * Handle Admin Panel Selection and Account Creation (Final Step for /create)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleAdminPanelSelect(chatId, messageId, panel, gbLimit, daysLimit, userName, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const adminLang = await get_user_language(chatId, env);
+
+    // Clear the state
+    await setUserState(chatId, 'clear', {}, env);
+
+    // Re-check panel validity
+    if (panel <= 0 || !SERVER_NAMES[panel]) {
+        await sendOrEditMessage(chatId, get_text('error_invalid_panel_range', adminLang), messageId, null, token);
+        return;
+    }
+
+    await finalizeAdminCreate(chatId, gbLimit, userName, daysLimit, panel, messageId, env);
+}
+
+/**
+ * Final execution of Admin Create
+ * @param {Object} env Cloudflare environment object
+ */
+async function finalizeAdminCreate(chatId, gbLimit, userName, daysLimit, panel, messageId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const adminLang = await get_user_language(chatId, env);
+
+    // 1. Send or edit initial loading message
+    let loadingMessageId = messageId;
+    if (!loadingMessageId) {
+        const initialMsg = await sendMessage(chatId, get_text('status_creating_premium', adminLang), null, true, token);
+        loadingMessageId = initialMsg.data?.result?.message_id;
+    } else {
+        // If messageId is provided (from callback), edit it to show loading status
+        await editMessageText(chatId, loadingMessageId, get_text('status_creating_premium', adminLang), null, true, token);
+    }
+
+    // --- API CALL ---
+    const result = await createPremiumAccount(gbLimit, userName, daysLimit, panel);
+    // --- END API CALL ---
+
+    const panelNameDisplay = SERVER_NAMES[panel] ?? `Panel ${panel}`;
+    let finalMessage;
+
+    if (result.success) {
+        const data = result.data;
+        const expiryText = daysLimit > 0 ? `${daysLimit} days` : "Unlimited";
+
+        finalMessage = get_text('create_success_title', adminLang) + "\n\n" +
+            get_text('field_email', adminLang) + ` \`${data.email}\`\n` +
+            get_text('field_password', adminLang) + ` \`${data.password}\`\n` +
+            get_text('field_data_limit', adminLang) + ` ${gbLimit} GB\n` +
+            get_text('field_expiry_days', adminLang) + ` ${expiryText}\n` +
+            get_text('field_panel_id', adminLang) + ` ${panelNameDisplay}\n\n` +
+            get_text('field_link', adminLang) + `\n\`${data.link}\`\n\n` +
+            get_text('field_qr', adminLang) + `\n${data.qr_code}`;
+    } else {
+        finalMessage = get_text('error_admin_create_failed', adminLang) + "\n\n" +
+            get_text('error_prefix', adminLang) + ` \`${result.error}\``;
+    }
+
+    // 2. Final message handling: Attempt to edit the loading message
+    if (loadingMessageId) {
+        const editResult = await editMessageText(chatId, loadingMessageId, finalMessage, null, true, token);
+
+        if (!editResult.success) {
+            // If edit failed, send a new message
+            await sendMessage(chatId, finalMessage, null, true, token);
+        }
+    } else {
+        // Fallback: Send new message if loadingMessageId was somehow not set
+        await sendMessage(chatId, finalMessage, null, true, token);
+    }
+}
+
+
+/**
+ * Handle /addcredit and /removecredit commands (Admin only)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleCreditControl(chatId, params, operation, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    if (!isAdmin(chatId)) {
+        await sendMessage(chatId, get_text('admin_access_denied', lang), null, true, token);
+        return;
+    }
+
+    if (params.length < 2) {
+        const usageKey = operation === 'add' ? 'admin_credit_usage_add' : 'admin_credit_usage_remove';
+        await sendMessage(chatId, get_text('admin_usage', lang) + " " + get_text(usageKey, lang), null, true, token);
+        return;
+    }
+
+    const criteria = params[0];
+    const amount = parseFloat(params[1]);
+
+    if (isNaN(amount) || amount <= 0) {
+        await sendMessage(chatId, get_text('admin_credit_value_error', lang), null, true, token);
+        return;
+    }
+
+    const targetUser = await getUserByCriteria(criteria, env);
+    if (!targetUser) {
+        await sendMessage(chatId, formatText(get_text('error_user_not_found', lang), criteria), null, true, token);
+        return;
+    }
+
+    // Send initial loading message
+    const loadingText = `🔄 *${operation === 'add' ? 'Adding' : 'Removing'} ${amount.toFixed(1)} Credits* for user \`${targetUser.user_id}\`...`;
+    const initialMsg = await sendMessage(chatId, loadingText, null, true, token);
+    const messageId = initialMsg.data?.result?.message_id;
+
+    const targetUserId = targetUser.user_id;
+    const targetName = targetUser.username ? `@${targetUser.username.replace(/_/g, '\\_')}` : String(targetUserId); // Escape username
+
+    const source = operation === 'add' ? get_text('credit_source_admin_add', lang) : get_text('credit_source_admin_deduct', lang);
+    const { success, newCredit } = await setCredits(targetUserId, amount, operation, false, source, env);
+
+    if (success) {
+        const successKey = operation === 'add' ? 'admin_add_credit_success' : 'admin_remove_credit_success';
+        const finalMessage = formatText(get_text(successKey, lang), amount, targetName, newCredit);
+        await sendOrEditMessage(chatId, finalMessage, messageId, null, token);
+    } else {
+        const errorMessage = get_text('error_admin_approval_failed', lang);
+        await sendOrEditMessage(chatId, errorMessage, messageId, null, token);
+    }
+}
+
+/**
+ * Handle /getkv command (Admin only)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleGetKV(chatId, key, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    if (!isAdmin(chatId)) {
+        await sendMessage(chatId, get_text('admin_access_denied', lang), null, true, token);
+        return;
+    }
+
+    if (!key) {
+        await sendMessage(chatId, get_text('admin_kv_usage_get', lang), null, true, token);
+        return;
+    }
+
+    try {
+        // @ts-ignore
+        const value = await env.BOT_KV.get(key);
+        let content = value ?? 'null';
+
+        // Attempt to pretty print JSON if it looks like JSON
+        try {
+            if (content && typeof content === 'string' && (content.startsWith('{') || content.startsWith('['))) {
+                content = JSON.stringify(JSON.parse(content), null, 2);
+            }
+        } catch (e) {
+            // Ignore JSON parsing error, use original content
+        }
+
+        const message = formatText(get_text('admin_kv_get_success', lang), key) + `\n\n\`\`\`json\n${content}\n\`\`\``;
+        await sendMessage(chatId, message, null, true, token);
+    } catch (e) {
+        const errorMsg = formatText(get_text('admin_kv_error', lang), e.message);
+        await sendMessage(chatId, errorMsg, null, true, token);
+    }
+}
+
+/**
+ * Handle /setkv command (Admin only)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleSetKV(chatId, key, jsonValue, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    if (!isAdmin(chatId)) {
+        await sendMessage(chatId, get_text('admin_access_denied', lang), null, true, token);
+        return;
+    }
+
+    if (!key || !jsonValue) {
+        await sendMessage(chatId, get_text('admin_kv_usage_set', lang), null, true, token);
+        return;
+    }
+
+    try {
+        let parsedValue = jsonValue.trim();
+        let valueToStore = parsedValue;
+
+        // Try to parse as JSON if it's an object/array, otherwise store as string
+        if (parsedValue.startsWith('{') || parsedValue.startsWith('[')) {
+            try {
+                valueToStore = JSON.stringify(JSON.parse(parsedValue));
+            } catch (e) {
+                // If JSON parsing fails, use the raw string, but note the error
+                await sendMessage(chatId, `⚠️ Warning: Input for key \`${key}\` was sent as a raw string because JSON parsing failed: ${e.message}`, null, true, token);
+                valueToStore = parsedValue;
+            }
+        }
+
+        // @ts-ignore
+        await env.BOT_KV.put(key, valueToStore);
+
+        // --- Added Confirmation of Stored Value ---
+        let confirmationValue = valueToStore;
+        try {
+            confirmationValue = JSON.stringify(JSON.parse(valueToStore), null, 2);
+        } catch (e) {
+            // Keep original value if not JSON
+        }
+
+        const message = formatText(get_text('admin_kv_set_success', lang), key) +
+            `\n\n*Set Value:* \n\`\`\`json\n${confirmationValue}\n\`\`\``;
+        // --- End Added Confirmation ---
+
+        await sendMessage(chatId, message, null, true, token);
+    } catch (e) {
+        const errorMsg = formatText(get_text('admin_kv_error', lang), e.message);
+        await sendMessage(chatId, errorMsg, null, true, token);
+    }
+}
+
+/**
+ * Handle /delprem command (Admin only)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleDelPrem(chatId, params, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    if (!isAdmin(chatId)) {
+        await sendMessage(chatId, get_text('admin_access_denied', lang), null, true, token);
+        return;
+    }
+
+    if (params.length < 2 || isNaN(parseInt(params[1]))) {
+        await sendMessage(chatId, get_text('admin_usage', lang) + " " + get_text('cmd_delprem', lang), null, true, token);
+        return;
+    }
+
+    const userName = params[0];
+    const panel = parseInt(params[1]);
+
+    const initialMsg = await sendMessage(chatId, get_text('status_deleting_premium', lang), null, true, token);
+    const messageId = initialMsg.data?.result?.message_id;
+
+    const result = await deletePremiumAccount(userName, panel);
+
+    if (result.success) {
+        const data = result.data;
+
+        const message = get_text('delete_prem_success', lang) + "\n\n" +
+            get_text('field_email', lang) + ` \`${userName}\`\n` +
+            get_text('field_panel_id', lang) + ` ${data.panel_name}\n` +
+            get_text('field_status_result', lang) + ` ${data.status}`;
+
+        await sendOrEditMessage(chatId, message, messageId, null, token);
+    } else {
+        const errorMessage = get_text('error_admin_delete_failed', lang) + "\n\n" +
+            get_text('error_prefix', lang) + ` \`${result.error}\``;
+        await sendOrEditMessage(chatId, errorMessage, messageId, null, token);
+    }
+}
+
+/**
+ * Handle /deltrial command (Admin only)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleDelTrial(chatId, telegramId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    if (!isAdmin(chatId)) {
+        await sendMessage(chatId, get_text('admin_access_denied', lang), null, true, token);
+        return;
+    }
+
+    const initialMsg = await sendMessage(chatId, get_text('status_deleting_trial', lang), null, true, token);
+    const messageId = initialMsg.data?.result?.message_id;
+
+    const result = await deleteTrialAccount(telegramId);
+
+    if (result.success) {
+        const data = result.data;
+
+        const message = get_text('delete_trial_success', lang) + "\n\n" +
+            get_text('field_telegram_id', lang) + ` \`${telegramId}\`\n` +
+            get_text('field_panel_id', lang) + ` ${data.panel_name}\n` +
+            get_text('field_status_result', lang) + ` ${data.status}`;
+
+        await sendOrEditMessage(chatId, message, messageId, null, token);
+    } else {
+        const errorMessage = get_text('error_admin_deltrial_failed', lang) + "\n\n" +
+            get_text('error_prefix', lang) + ` \`${result.error}\``;
+        await sendOrEditMessage(chatId, errorMessage, messageId, null, token);
+    }
+}
+
+/**
+ * Handle /delexp command (Admin only)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleDelExp(chatId, panelParam, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    if (!isAdmin(chatId)) {
+        await sendMessage(chatId, get_text('admin_access_denied', lang), null, true, token);
+        return;
+    }
+
+    const panel = panelParam ? parseInt(panelParam) : null;
+    const type_key = panel ? 'delete_exp_premium_type' : 'delete_exp_trial_type';
+    const type_name = panel ? formatText(get_text(type_key, lang), panel) : get_text(type_key, lang);
+
+    const initialMsg = await sendMessage(chatId, formatText(get_text('status_deleting_expired', lang), type_name), null, true, token);
+    const messageId = initialMsg.data?.result?.message_id;
+
+    const result = await deleteExpiredAccounts(panel);
+
+    if (result.success) {
+        const data = result.data;
+
+        let message = get_text('delete_exp_complete', lang) + "\n\n" +
+            get_text('field_deleted_type', lang) + ` ${type_name}\n` +
+            get_text('field_panel_id', lang) + ` ${data.panel_name}\n` +
+            get_text('field_deleted_count', lang) + ` ${data.deleted_count} accounts\n` +
+            get_text('field_total_expired', lang) + ` ${data.total_expired_found} expired\n` +
+            get_text('field_status_result', lang) + ` ${data.status}`;
+
+        if (data.failed_deletions && data.failed_deletions.length > 0) {
+            message += "\n\n" + get_text('field_failed_deletions', lang) + ` ${data.failed_deletions.length}`;
+        }
+
+        await sendOrEditMessage(chatId, message, messageId, null, token);
+    } else {
+        const errorMessage = get_text('error_admin_delexp_failed', lang) + "\n\n" +
+            get_text('error_prefix', lang) + ` \`${result.error}\``;
+        await sendOrEditMessage(chatId, errorMessage, messageId, null, token);
+    }
+}
+
+/**
+ * Handle /transfer command (Admin only)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleTransfer(chatId, params, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    if (!isAdmin(chatId)) {
+        await sendMessage(chatId, get_text('admin_access_denied', lang), null, true, token);
+        return;
+    }
+
+    if (params.length < 3 || isNaN(parseInt(params[1])) || isNaN(parseInt(params[2]))) {
+        await sendMessage(chatId, get_text('usage_transfer', lang), null, true, token);
+        return;
+    }
+
+    const userName = params[0];
+    const fromPanel = parseInt(params[1]);
+    const toPanel = parseInt(params[2]);
+
+    if (fromPanel <= 0 || toPanel <= 0) {
+        await sendMessage(chatId, get_text('error_invalid_panel_range', lang), null, true, token);
+        return;
+    }
+
+    const initialMsg = await sendMessage(chatId, formatText(get_text('status_transferring', lang), userName, fromPanel, toPanel), null, true, token);
+    const messageId = initialMsg.data?.result?.message_id;
+
+    const result = await transferAccount(userName, fromPanel, toPanel);
+
+    if (result.success) {
+        const data = result.data;
+        const message = formatText(get_text('transfer_success', lang), data.from_panel, data.to_panel, data.email) + "\n\n" +
+            get_text('field_link', lang) + `\`\`\`${data.link}\`\`\`\n\n` +
+            get_text('field_qr', lang) + `\n${data.qr_code}`;
+        await sendOrEditMessage(chatId, message, messageId, null, token);
+    } else {
+        const errorMessage = get_text('error_prefix', lang) + ` \`${result.error}\`\n\n` +
+            (result.data?.status ?? '');
+        await sendOrEditMessage(chatId, errorMessage, messageId, null, token);
+    }
+}
+
+/**
+ * Handle /resettraffic command (Admin only)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleResetTraffic(chatId, params, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    if (!isAdmin(chatId)) {
+        await sendMessage(chatId, get_text('admin_access_denied', lang), null, true, token);
+        return;
+    }
+
+    if (params.length < 2 || isNaN(parseInt(params[1]))) {
+        await sendMessage(chatId, get_text('usage_resettraffic', lang), null, true, token);
+        return;
+    }
+
+    const userName = params[0];
+    const panel = parseInt(params[1]);
+
+    if (panel <= 0) {
+        await sendMessage(chatId, get_text('error_invalid_panel_range', lang), null, true, token);
+        return;
+    }
+
+    const initialMsg = await sendMessage(chatId, formatText(get_text('status_resetting', lang), userName, panel), null, true, token);
+    const messageId = initialMsg.data?.result?.message_id;
+
+    const result = await resetTrafficUsage(userName, panel);
+
+    if (result.success) {
+        const data = result.data;
+        const message = formatText(get_text('reset_success', lang), data.email, data.panel_name, data.status);
+        await sendOrEditMessage(chatId, message, messageId, null, token);
+    } else {
+        const errorMessage = get_text('error_prefix', lang) + ` \`${result.error}\``;
+        await sendOrEditMessage(chatId, errorMessage, messageId, null, token);
+    }
+}
+
+/**
+ * Handle /modify command (Admin only)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleModifyAccount(chatId, params, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    if (!isAdmin(chatId)) {
+        await sendMessage(chatId, get_text('admin_access_denied', lang), null, true, token);
+        return;
+    }
+
+    if (params.length < 4 || isNaN(parseInt(params[1])) || isNaN(parseFloat(params[2])) || isNaN(parseInt(params[3]))) {
+        await sendMessage(chatId, get_text('usage_modify', lang), null, true, token);
+        return;
+    }
+
+    const userName = params[0];
+    const panel = parseInt(params[1]);
+    const gbLimit = parseFloat(params[2]);
+    const daysLimit = parseInt(params[3]);
+    const newPassword = params[4] ?? ''; // Optional
+
+    if (panel <= 0) {
+        await sendMessage(chatId, get_text('error_invalid_panel_range', lang), null, true, token);
+        return;
+    }
+
+    // Quick validation check
+    if (gbLimit < 0 || daysLimit < 0) {
+        await sendMessage(chatId, "❌ *GB Limit and Days Limit must be non-negative numbers.*", null, true, token);
+        return;
+    }
+
+    const initialMsg = await sendMessage(chatId, formatText(get_text('status_modifying', lang), userName, panel), null, true, token);
+    const messageId = initialMsg.data?.result?.message_id;
+
+    const result = await modifyAccountDetails(userName, panel, gbLimit, daysLimit, newPassword);
+
+    if (result.success) {
+        const data = result.data;
+        const passwordStatus = newPassword ? 'Updated' : 'Not Changed';
+        const message = formatText(get_text('modify_success', lang), data.email, data.panel_name, data.status) +
+            `\nChanges:\n- GB Limit: ${gbLimit} GB\n- Days: ${daysLimit} days\n- Password: ${passwordStatus}`;
+        await sendOrEditMessage(chatId, message, messageId, null, token);
+    } else {
+        const errorMessage = get_text('error_prefix', lang) + ` \`${result.error}\`\n\nDetails: ${result.data?.details ?? 'N/A'}`;
+        await sendOrEditMessage(chatId, errorMessage, messageId, null, token);
+    }
+}
+
+/**
+ * Handle /bulkcreate command (Admin only)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleBulkCreate(chatId, params, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    if (!isAdmin(chatId)) {
+        await sendMessage(chatId, get_text('admin_access_denied', lang), null, true, token);
+        return;
+    }
+
+    if (params.length < 4 || isNaN(parseFloat(params[1])) || isNaN(parseInt(params[2])) || isNaN(parseInt(params[3]))) {
+        await sendMessage(chatId, get_text('usage_bulkcreate', lang), null, true, token);
+        return;
+    }
+
+    const namesString = params[0];
+    const gbLimit = parseFloat(params[1]);
+    const daysLimit = parseInt(params[2]);
+    const panel = parseInt(params[3]);
+    const names = namesString.split(',').map(name => name.trim()).filter(name => name.length > 0);
+
+    if (panel <= 0) {
+        await sendMessage(chatId, get_text('error_invalid_panel_range', lang), null, true, token);
+        return;
+    }
+    if (names.length === 0) {
+        await sendMessage(chatId, "❌ No user names provided for bulk creation.", null, true, token);
+        return;
+    }
+
+    const initialMsg = await sendMessage(chatId, formatText(get_text('status_bulk_create', lang), names.length), null, true, token);
+    const messageId = initialMsg.data?.result?.message_id;
+
+    const result = await bulkCreateAccounts(names, gbLimit, daysLimit, panel);
+
+    if (result.success) {
+        const message = get_text('bulk_success', lang) + `\n\n*Count:* ${names.length}\n*GB:* ${gbLimit}\n*Panel:* ${panel}\n\n_Note: Individual results are logged on the PHP server side, as the API does not return a full batch response here._`;
+        await sendOrEditMessage(chatId, message, messageId, null, token);
+    } else {
+        const errorMessage = get_text('error_prefix', lang) + ` \`${result.error}\``;
+        await sendOrEditMessage(chatId, errorMessage, messageId, null, token);
+    }
+}
+
+/**
+ * Handle /runwarnings command (Admin only)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleRunWarnings(chatId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    if (!isAdmin(chatId)) {
+        await sendMessage(chatId, get_text('admin_access_denied', lang), null, true, token);
+        return;
+    }
+
+    const initialMsg = await sendMessage(chatId, get_text('status_running_warnings', lang), null, true, token);
+    const messageId = initialMsg.data?.result?.message_id;
+
+    const result = await runExpiryWarnings();
+
+    if (result.success) {
+        const message = get_text('warnings_success', lang) + `\n\nStatus: ${result.data?.status ?? 'Completed successfully.'}`;
+        await sendOrEditMessage(chatId, message, messageId, null, token);
+    } else {
+        const errorMessage = get_text('error_prefix', lang) + ` \`${result.error}\``;
+        await sendOrEditMessage(chatId, errorMessage, messageId, null, token);
+    }
+}
+
+/**
+ * Handle /optimal command (Admin only)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleOptimalPanel(chatId, params, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    if (!isAdmin(chatId)) {
+        await sendMessage(chatId, get_text('admin_access_denied', lang), null, true, token);
+        return;
+    }
+
+    const type = params[0] === 'trial' ? 'trial' : 'premium';
+
+    const initialMsg = await sendMessage(chatId, formatText(get_text('status_optimal_panel', lang), type), null, true, token);
+    const messageId = initialMsg.data?.result?.message_id;
+
+    const result = await getOptimalPanel(type);
+
+    if (result.success) {
+        const data = result.data;
+        const message = formatText(get_text('optimal_success', lang), data.optimal_panel, data.panel_name, data.account_type.toUpperCase());
+        await sendOrEditMessage(chatId, message, messageId, null, token);
+    } else {
+        const errorMessage = get_text('error_prefix', lang) + ` \`${result.error}\``;
+        await sendOrEditMessage(chatId, errorMessage, messageId, null, token);
+    }
+}
+
+// =========================================================================
+// NEW: ONLINE USER HANDLERS
+// =========================================================================
+
+/**
+ * Helper to prepare online user data for pagination.
+ */
+function prepareOnlineUsersForPagination(apiData) {
+    const flattenedList = [];
+    const onlineByPanel = apiData.online_users_by_panel || {};
+
+    for (const panelName in onlineByPanel) {
+        const users = onlineByPanel[panelName];
+        for (let i = 0; i < users.length; i++) {
+            flattenedList.push({
+                email: users[i],
+                panel: panelName,
+                index: flattenedList.length + 1
+            });
+        }
+    }
+    return flattenedList;
+}
+
+/**
+ * Main handler for /online command and online_page callbacks.
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleOnlineUsers(chatId, messageId = null, page = 1, isCallback = false, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+
+    if (!isAdmin(chatId)) {
+        if (!isCallback) {
+             await sendMessage(chatId, get_text('admin_access_denied', lang), null, true, token);
+        }
+        return;
+    }
+
+    // 1. Initial/Loading message
+    let loadingMessageId = messageId;
+    let initialMessage = null;
+
+    if (!isCallback) {
+        initialMessage = await sendMessage(chatId, get_text('status_fetching_online', lang), null, true, token);
+        loadingMessageId = initialMessage.data?.result?.message_id;
+    }
+
+    // 2. Check cache or Fetch fresh Stats
+    const onlineDataKey = `online_users_data_${chatId}`;
+    // @ts-ignore
+    let cachedData = JSON.parse(await env.BOT_KV.get(onlineDataKey)) || {}; // Direct KV read
+    let flattenedList = cachedData.list;
+    let totalOnlineUsers = 0;
+    let errorOccurred = false;
+    let errorMessageText = '';
+    let fetchedFresh = false;
+
+    // Check if data is expired (1 min cache) or missing
+    if (!flattenedList || cachedData.timestamp < (Date.now() - 60000)) {
+        fetchedFresh = true;
+
+        // If it's a pagination request and cache expired, show brief waiting state on the existing message
+        if (isCallback && loadingMessageId) {
+             await editMessageText(chatId, loadingMessageId, get_text('status_fetching_online', lang), { inline_keyboard: [] }, true, token);
+        }
+
+        const result = await getOnlineUsers();
+
+        if (!result.success || result.data.total_online_users === 0) {
+            errorOccurred = true;
+            errorMessageText = result.success ? get_text('no_online_users_found', lang) : get_text('error_prefix', lang) + ` \`${result.error}\``;
+        } else {
+            totalOnlineUsers = result.data.total_online_users;
+            flattenedList = prepareOnlineUsersForPagination(result.data);
+
+            // Store the fresh data in KV for pagination
+            // @ts-ignore
+            await env.BOT_KV.put(onlineDataKey, JSON.stringify({
+                list: flattenedList,
+                total: totalOnlineUsers,
+                timestamp: Date.now()
+            }), { expirationTtl: 120 }); // Cache for 2 minutes
+        }
+    } else {
+        totalOnlineUsers = cachedData.total;
+    }
+
+    // 3. Format Message and Keyboard
+
+    if (errorOccurred && (fetchedFresh || !flattenedList)) {
+        const finalMessage = get_text('menu_online_users_title', lang) + "\n" +
+            get_text('welcome_separator', lang) + "\n\n" +
+            errorMessageText;
+        // Send final message (or edit loading message) without any navigation buttons
+        await sendOrEditMessage(chatId, finalMessage, loadingMessageId, { inline_keyboard: [] }, token);
+        return;
+    }
+
+
+    // Pagination Logic
+    const totalUsers = flattenedList.length;
+    const totalPages = totalUsers > 0 ? Math.ceil(totalUsers / ONLINE_USERS_PER_PAGE) : 1;
+    page = Math.max(1, Math.min(page, totalPages));
+    const offset = (page - 1) * ONLINE_USERS_PER_PAGE;
+
+    const currentPageUsers = flattenedList.slice(offset, offset + ONLINE_USERS_PER_PAGE);
+
+    let message = get_text('menu_online_users_title', lang) + "\n" +
+        get_text('welcome_separator', lang) + "\n\n" +
+        formatText(get_text('field_total_online', lang), totalOnlineUsers) + "\n" +
+        formatText(get_text('stats_top_title', lang), page, totalPages) + "\n" +
+        get_text('welcome_separator', lang) + "\n\n";
+
+    // Group by panel for display (optional, but nice detail)
+    const usersByPanel = {};
+    currentPageUsers.forEach(user => {
+        if (!usersByPanel[user.panel]) usersByPanel[user.panel] = [];
+        usersByPanel[user.panel].push(user);
+    });
+
+    // Sort panels alphabetically for stable output
+    const sortedPanelNames = Object.keys(usersByPanel).sort();
+
+    for (const panelName of sortedPanelNames) {
+        const panelUsers = usersByPanel[panelName];
+        message += formatText(get_text('field_online_on_panel', lang), panelName, panelUsers.length) + "\n";
+
+        for (const user of panelUsers) {
+            message += `\`${user.email}\`\n`;
+        }
+        message += "\n";
+    }
+
+    message = message.trim();
+
+    // Create Keyboard (Only Navigation, NO BACK BUTTON)
+    const keyboardButtons = [];
+    const navRow = [];
+
+    if (page > 1) {
+        navRow.push({ text: get_text('nav_online_prev', lang), callback_data: `online_page_${page - 1}` });
+    }
+
+    if (page < totalPages) {
+        navRow.push({ text: get_text('nav_online_next', lang), callback_data: `online_page_${page + 1}` });
+    }
+
+    if (navRow.length > 0) {
+        keyboardButtons.push(navRow);
+    }
+
+    const keyboard = { inline_keyboard: keyboardButtons };
+
+    // 4. Send/Edit Message
+    await sendOrEditMessage(chatId, message, loadingMessageId, keyboard, token);
+}
+
+
+// =========================================================================
+// MENU HANDLERS
+// =========================================================================
+
+/**
+ * Handle V2Ray Manager Basic Statistics Menu (Publicly accessible)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleStatsMenu(chatId, messageId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+
+    const message = get_text('menu_basic_stats_title', lang) + "\n" +
+        get_text('welcome_separator', lang) + "\n" +
+        get_text('menu_basic_stats_tip', lang) + "\n\n" +
+        get_text('menu_basic_stats_content', lang);
+
+    const keyboard = {
+        inline_keyboard: [
+            [
+                { text: get_text('button_usage_report', lang), callback_data: 'stats_usage_report' },
+                { text: get_text('button_top_users', lang), callback_data: 'stats_users_1_menu_basic_stats' },
+            ],
+            [
+                { text: get_text('button_back', lang), callback_data: 'menu_about' }
+            ]
+        ]
+    };
+
+    await sendOrEditMessage(chatId, message, messageId, keyboard, token);
+}
+
+/**
+ * Handle /stats command and stats_usage_report callback
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleStats(chatId, messageId, isCallback = false, backTarget = 'menu_start', env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+
+    // /stats command remains admin-only
+    if (!isCallback && !isAdmin(chatId)) {
+             await sendMessage(chatId, get_text('admin_access_denied', lang), null, true, token);
+             return;
+    }
+
+    let loadingMessageId = messageId;
+
+    // Direct /stats command (admin only) shows loading, but callbacks from menu edit directly to result.
+    if (!isCallback) {
+        const initialMsg = await sendMessage(chatId, get_text('status_retrieving_stats', lang), null, true, token);
+        loadingMessageId = initialMsg.data?.result?.message_id;
+    }
+
+    const stats = await getUserStats(env);
+    const activityStats = getUserActivityStats(stats.users);
+
+    let message = get_text('stats_report_title', lang) + "\n" +
+        get_text('welcome_separator', lang) + "\n";
+
+    message += formatText(get_text('stats_active_day', lang), activityStats.day) + "\n";
+    message += formatText(get_text('stats_active_week', lang), activityStats.week) + "\n";
+    message += formatText(get_text('stats_active_month', lang), activityStats.month) + "\n";
+    message += formatText(get_text('stats_active_year', lang), activityStats.year) + "\n";
+
+    message += get_text('welcome_separator', lang) + "\n";
+
+    message += formatText(get_text('stats_total_users_line', lang), activityStats.total);
+
+    const keyboardButtons = [];
+
+    if (backTarget === 'menu_basic_stats') {
+        keyboardButtons.push([{ text: get_text('button_back', lang), callback_data: 'menu_basic_stats' }]);
+    } else if (backTarget === 'menu_admin') {
+        keyboardButtons.push([{ text: get_text('button_back', lang), callback_data: 'menu_admin' }]);
+    }
+
+    const keyboard = { inline_keyboard: keyboardButtons };
+
+    await sendOrEditMessage(chatId, message, loadingMessageId, keyboard, token);
+}
+
+/**
+ * Handle paginated list of recent users (now publicly accessible via menu)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleRecentUsers(chatId, messageId, page, backCallback, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+
+    const stats = await getUserStats(env);
+    const allUsers = stats.users;
+    const totalUsers = stats.total_users;
+    const totalPages = totalUsers > 0 ? Math.ceil(totalUsers / USERS_PER_PAGE) : 1;
+
+    page = Math.max(1, Math.min(page, totalPages));
+    const offset = (page - 1) * USERS_PER_PAGE;
+
+    const currentPageUsers = allUsers.slice(offset, offset + USERS_PER_PAGE);
+
+    let message = formatText(get_text('stats_top_title', lang), page, totalPages) + "\n" +
+        get_text('welcome_separator', lang) + "\n";
+
+    if (totalUsers === 0) {
+        message += get_text('stats_no_users', lang);
+    } else {
+        let rank = offset + 1;
+        for (const user of currentPageUsers) {
+            let rank_marker = '🔸';
+            if (rank === 1) rank_marker = '🥇';
+            if (rank === 2) rank_marker = '🥈';
+            if (rank === 3) rank_marker = '🥉';
+
+            // Use getSafeDisplayName for display name and link text
+            const displayName = getSafeDisplayName(user);
+            const userLink = `[${displayName}](tg://user?id=${user.user_id})`;
+
+            message += `${rank_marker} *${rank}.* ${userLink}\n` +
+                get_text('user_id_label', lang) + ` \`${user.user_id}\`\n\n`;
+
+            rank++;
+        }
+        message = message.trim();
+    }
+
+    const keyboardButtons = [];
+    const navRow = [];
+
+    if (page > 1) {
+        navRow.push({ text: get_text('nav_prev', lang), callback_data: `stats_users_${page - 1}_${backCallback}` });
+    }
+
+    if (page < totalPages) {
+        navRow.push({ text: get_text('nav_next', lang), callback_data: `stats_users_${page + 1}_${backCallback}` });
+    }
+
+    if (navRow.length > 0) {
+        keyboardButtons.push(navRow);
+    }
+
+    keyboardButtons.push([{ text: get_text('nav_close', lang), callback_data: `stats_summary_${backCallback}` }]);
+
+    const keyboard = { inline_keyboard: keyboardButtons };
+
+    // Edit the message directly with the result
+    await editMessageText(chatId, messageId, message, keyboard, true, token);
+}
+
+/**
+ * Handle /broadcast command (Admin only)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleBroadcast(chatId, update, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    if (!isAdmin(chatId)) {
+        await sendMessage(chatId, get_text('admin_access_denied', lang), null, true, token);
+        return;
+    }
+
+    const replyToMessage = update.message.reply_to_message;
+
+    if (!replyToMessage) {
+        const helpText = get_text('broadcast_usage', lang);
+        await sendMessage(chatId, helpText, null, true, token);
+        return;
+    }
+
+    const stats = await getUserStats(env);
+    const totalUsers = stats.total_users;
+    const userList = stats.users;
+
+    // Send initial loading message
+    const initialText = formatText(get_text('status_broadcasting', lang), totalUsers, 0, totalUsers);
+    const initialMsg = await sendMessage(chatId, initialText, null, true, token);
+    const messageId = initialMsg.data?.result?.message_id;
+
+    // Execute the broadcast logic
+    const broadcastResult = await processBroadcast(replyToMessage, totalUsers, userList, messageId, chatId, lang, env);
+
+    if (broadcastResult.success) {
+        let message = get_text('broadcast_complete', lang) + "\n\n";
+        message += get_text('broadcast_success', lang) + ` ${broadcastResult.success_count}\n`;
+        message += get_text('broadcast_failed', lang) + ` ${broadcastResult.failed_count}\n`;
+        message += get_text('broadcast_total', lang) + ` ${broadcastResult.total_users}`;
+
+        // Edit the final message
+        await sendOrEditMessage(chatId, message, messageId, null, token);
+    } else {
+        const message = get_text('broadcast_failed_error', lang) + "\n\n" + get_text('error_prefix', lang) + " [Unknown Error during processing]";
+        await sendOrEditMessage(chatId, message, messageId, null, token);
+    }
+}
+
+/**
+ * Handle /request command
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleRequestCommand(chatId, messageText, username, userId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+
+    const command_prefix = '/request';
+    const messageContent = messageText.substring(messageText.indexOf(command_prefix) + command_prefix.length).trim();
+
+    if (messageContent.length === 0) {
+        await sendMessage(chatId, get_text('request_usage', lang), null, true, token);
+        return;
+    }
+
+    // FIX: Change const to let to allow concatenation via +=
+    let adminMessage = "🚨 *NEW USER REQUEST* 🚨\n\n";
+    // Fix: Escape underscore in username for Markdown display
+    const safeUsername = username ? `@${username.replace(/_/g, '\\_')}` : "No Username";
+    // @ts-ignore
+    adminMessage += `👤 *User:* ${safeUsername} (\`${userId}\`)\n`;
+    // @ts-ignore
+    adminMessage += `📝 *Message:* ${messageContent}\n`;
+    // @ts-ignore
+    adminMessage += `🕒 *Time:* ${formatText(get_text('admin_field_time', DEFAULT_LANG), Date.now() / 1000)}`;
+
+    for (const adminId of ADMIN_IDS) {
+        await sendMessage(adminId, adminMessage, null, true, token);
+    }
+
+    await sendMessage(chatId, get_text('request_admin_sent', lang), null, true, token);
+}
+
+/**
+ * Handle /reply command (Admin only)
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleReply(chatId, params, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+    if (!isAdmin(chatId)) {
+        await sendMessage(chatId, get_text('admin_access_denied', lang), null, true, token);
+        return;
+    }
+
+    if (params.length < 2 || isNaN(parseInt(params[0]))) {
+        await sendMessage(chatId, get_text('admin_usage', lang) + " " + get_text('cmd_reply', lang), null, true, token);
+        return;
+    }
+
+    const targetUserId = parseInt(params[0]);
+    const replyMessage = params.slice(1).join(' ');
+
+    const user = await getUserById(targetUserId, env);
+    if (!user) {
+        await sendMessage(chatId, formatText(get_text('error_user_not_found', lang), targetUserId), null, true, token);
+        return;
+    }
+
+    const targetLang = user.lang ?? DEFAULT_LANG;
+    const messageToUser = get_text('reply_from_admin', targetLang) + `\n\n${replyMessage}\n\n` + get_text('reply_tip', targetLang);
+    const sendResult = await sendMessage(targetUserId, messageToUser, null, true, token);
+
+    if (sendResult.success) {
+        let confirmMessage = get_text('reply_success_admin', lang) + "\n\n";
+        confirmMessage += get_text('admin_to', lang) + ` ${user.first_name}`;
+        // Escape underscore in username for Markdown display
+        if (user.username) {
+            confirmMessage += ` (@${user.username.replace(/_/g, '\\_')})`;
+        }
+        confirmMessage += ` (\`${targetUserId}\`)\n`;
+        confirmMessage += get_text('admin_message_content', lang) + ` ${replyMessage}`;
+
+        await sendMessage(chatId, confirmMessage, null, true, token);
+    } else {
+        await sendMessage(chatId, get_text('reply_fail_admin', lang), null, true, token);
+    }
+}
+
+/**
+ * Handle /help command
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleHelp(chatId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+
+    // Define Admin commands separately, only show if user is admin
+    let adminCommands = "";
+    if (isAdmin(chatId)) {
+        adminCommands = "\n\n" +
+            get_text('admin_commands', lang) + "\n" +
+            get_text('cmd_admin', lang) + "\n" +
+            get_text('cmd_online', lang) + "\n" +
+            get_text('cmd_stats', lang) + "\n" +
+            get_text('cmd_broadcast', lang) + "\n" +
+            get_text('cmd_reply', lang) + "\n" +
+            get_text('cmd_approve', lang) + "\n" +
+            get_text('cmd_reject', lang) + "\n" +
+            get_text('cmd_ban_full', lang) + "\n" +
+            get_text('cmd_unban_full', lang) + "\n" +
+            get_text('cmd_create', lang) + "\n" +
+            get_text('cmd_delprem', lang) + "\n" +
+            get_text('cmd_deltrial', lang) + "\n" +
+            get_text('cmd_delexp', lang) + "\n" +
+            get_text('cmd_transfer', lang) + "\n" +
+            get_text('cmd_resettraffic', lang) + "\n" +
+            get_text('cmd_modify', lang) + "\n" +
+            get_text('cmd_bulkcreate', lang) + "\n" +
+            get_text('cmd_runwarnings', lang) + "\n" +
+            get_text('cmd_optimal', lang) + "\n" +
+            get_text('admin_credit_usage_add', lang) + "\n" +
+            get_text('admin_credit_usage_remove', lang) + "\n" +
+            get_text('cmd_getkv', lang) + "\n" +
+            get_text('cmd_setkv', lang);
+    }
+
+    const helpText = get_text('cmd_help', lang) + "\n\n" +
+        get_text('available_commands', lang) + "\n" +
+        get_text('cmd_premium', lang) + "\n" +
+        get_text('cmd_referral', lang) + "\n" +
+        get_text('cmd_trial', lang) + "\n" +
+        get_text('cmd_mytrial', lang) + "\n" +
+        get_text('cmd_apps', lang) + "\n" +
+        get_text('cmd_id', lang) + "\n" +
+        get_text('cmd_language', lang) + "\n" +
+        get_text('cmd_help', lang) + "\n" +
+        adminCommands + "\n\n" + // Insert Admin commands if applicable
+        get_text('quick_check_tip', lang) + "\n\n" +
+        "🔧 *Support:*\nFor technical issues, contact @nkka404";
+
+    await sendMessage(chatId, helpText, null, true, token);
+}
+
+/**
+ * Handle Admin Control Panel Menu
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleAdminMenu(chatId, messageId, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+
+    // Enforce admin access
+    if (!isAdmin(chatId)) {
+        await sendMessage(chatId, get_text('admin_access_denied', lang), null, true, token);
+        return;
+    }
+
+    const message = get_text('menu_admin_title', lang) + "\n" +
+        get_text('welcome_separator', lang) + "\n\n" +
+        "👑 *Admin commands are now accessible only via text commands (e.g., /stats, /broadcast, /online, /create, /ban).*";
+
+    // Simplified Admin Menu buttons
+    const keyboard = {
+        inline_keyboard: [
+            // Row 1: Back to start
+            [
+                { text: get_text('button_back_to_start', lang), callback_data: 'menu_start' }
+            ]
+        ]
+    };
+
+    await sendOrEditMessage(chatId, message, messageId, keyboard, token);
+}
+
+/**
+ * Handle V2Ray Config Check
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleV2RayConfig(chatId, config, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const lang = await get_user_language(chatId, env);
+
+    const initialMsg = await sendMessage(chatId, get_text('status_checking_config', lang), null, true, token);
+    const messageId = initialMsg.data?.result?.message_id;
+
+    const result = await checkV2RayAccount(config);
+
+    if (result.success) {
+        const data = result.data;
+
+        const status = data.enable ? get_text('status_active', lang) : get_text('status_disabled', lang);
+
+        let expiryStatus = get_text('status_active', lang);
+        if (data.expiry.status === 'expired') {
+            expiryStatus = get_text('expiry_expired', lang);
+        } else if (data.expiry.status === 'expiring_soon') {
+            expiryStatus = get_text('expiry_expiring_soon', lang);
+        }
+
+        const message = get_text('account_status_title', lang) + "\n━━━━━━━━━━━━━━━━━━━━━━\n" +
+            get_text('field_email', lang) + ` \`${data.email}\`\n` +
+            get_text('field_protocol', lang) + ` ${data.protocol.charAt(0).toUpperCase() + data.protocol.slice(1)}\n` +
+            get_text('field_panel', lang) + ` ${data.panel_name}\n` +
+            get_text('field_status', lang) + ` ${status}\n` +
+            get_text('field_expiry_status', lang) + ` ${expiryStatus}\n\n` +
+            get_text('traffic_usage_title', lang) + "\n━━━━━━━━━━━\n" +
+            get_text('field_upload', lang) + ` ${data.traffic.upload.text}\n` +
+            get_text('field_download', lang) + ` ${data.traffic.download.text}\n` +
+            get_text('field_total', lang) + ` ${data.traffic.total.text}\n` +
+            get_text('field_used', lang) + ` ${data.traffic.used.text}\n` +
+            get_text('field_remaining_traffic', lang) + ` ${data.traffic.remaining.text}\n` +
+            get_text('field_usage_percent', lang) + ` ${data.traffic.usage_percentage}\n\n` +
+            get_text('expiry_details_title', lang) + "\n━━━━━━━━━━━\n" +
+            get_text('field_remaining_time', lang) + ` ${data.expiry.remaining_time}\n` +
+            get_text('field_expiry_date', lang) + ` ${data.expiry.expiry_date}\n` +
+            get_text('field_days_left', lang) + ` ${data.expiry.days_remaining} days`;
+
+        await sendOrEditMessage(chatId, message, messageId, null, token);
+    } else {
+        const errorMessage = get_text('error_check_failed', lang) + "\n\n" +
+            get_text('error_prefix', lang) + ` \`${result.error}\`\n\n` +
+            get_text('tip_check_config', lang);
+        await sendOrEditMessage(chatId, errorMessage, messageId, null, token);
+    }
+}
+
+
+// =========================================================================
+// MAIN UPDATE HANDLERS
+// =========================================================================
+
+/**
+ * Main update processing function.
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleUpdate(update, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    if (!token) {
+        console.error("Configuration Error: TELEGRAM_BOT_TOKEN is missing in env.");
+        // We still return OK to Telegram to avoid retries, but we cannot process.
+        return;
+    }
+
+    if (!update.message && !update.callback_query) {
+        return;
+    }
+
+    const source = update.message ?? update.callback_query?.message;
+    const from = update.message?.from ?? update.callback_query?.from;
+
+    if (!source || !from) {
+        return;
+    }
+
+    const chatId = source.chat.id;
+    const userId = from.id;
+    const username = from.username ?? '';
+    const firstName = from.first_name ?? '';
+    const lastName = from.last_name ?? '';
+    const text = source.text ? source.text.trim() : '';
+    const messageId = source.message_id ?? update.callback_query?.message?.message_id ?? null;
+    let deepLink = null;
+
+    if (update.message?.text?.startsWith('/start ')) {
+        deepLink = update.message.text.split(' ')[1];
+    }
+
+    // ---------------------------------------------------------------------
+    // GLOBAL BAN CHECK
+    // ---------------------------------------------------------------------
+    if (await isUserBanned(userId, env)) {
+        if (update.message && text.length > 0) {
+            await handleAccessDeniedBanned(chatId, env);
+        }
+        return;
+    }
+    // ---------------------------------------------------------------------
+
+    // Handle callback queries
+    if (update.callback_query) {
+        await handleCallbackQuery(update.callback_query, env);
+        return;
+    }
+
+    // Check for user state (waiting for TxID, Custom GB amount, or Admin create)
+    const currentState = await getUserState(userId, env);
+
+    if (update.message) {
+        // 1. Handle TxID Submission
+        if (currentState?.state === 'waiting_for_txid' && text.length > 0 && !text.startsWith('/')) {
+            await handleTxidSubmission(chatId, userId, text, currentState, username, firstName, lastName, env);
+            return;
+        }
+
+        // 2. Handle Custom GB Redemption Input
+        if (currentState?.state === 'waiting_for_custom_gb' && text.length > 0 && !text.startsWith('/')) {
+            await handleCustomGbRedemptionInput(chatId, userId, text, messageId, env);
+            return;
+        }
+
+          // 3. Clear state if user sends non-command text while waiting for panel selection
+        if (currentState?.state === 'waiting_for_redeem_panel' || currentState?.state === 'waiting_for_create_panel') {
+            // If user sends anything other than a command or callback, cancel the flow
+            if (!text.startsWith('/')) {
+                await setUserState(userId, 'clear', {}, env);
+                const lang = await get_user_language(chatId, env);
+                await sendMessage(chatId, get_text('error_redemption_state_fail', lang), null, true, token);
+                return;
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Handle V2Ray config directly (quick check)
+    // ---------------------------------------------------------------------
+    if (text.length > 0 && !text.startsWith('/')) {
+        let isV2RayConfig = false;
+
+        if (text.startsWith('vmess://') ||
+            text.startsWith('vless://') ||
+            text.startsWith('trojan://') ||
+            text.startsWith('ss://')) {
+            isV2RayConfig = true;
+        }
+
+        if (/\S+@\S+\.\S+/.test(text)) {
+            isV2RayConfig = true;
+        }
+
+        if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(text)) {
+            isV2RayConfig = true;
+        }
+
+        if (isV2RayConfig) {
+            // Need to save user before calling handleV2RayConfig to ensure language preference is available
+            await saveUser(userId, username, firstName, lastName, null, null, env);
+            await handleV2RayConfig(chatId, text, env);
+            return;
+        }
+
+        // If it's not a recognized command or config/txid/gb amount, just acknowledge and proceed silently.
+        return;
+    }
+
+    // ---------------------------------------------------------------------
+    // Handle commands (checking multiple prefixes)
+    // ---------------------------------------------------------------------
+    const commandInfo = extractCommand(text);
+
+    if (commandInfo) {
+        const baseCommand = commandInfo.base;
+        const paramString = commandInfo.params;
+        const params = paramString.split(/\s+/).filter(p => p.length > 0);
+
+        // Save user for command processing (e.g., getting language)
+        await saveUser(userId, username, firstName, lastName, null, null, env);
+
+        // Clear state only if it's not an explicit flow command like /approve
+        const stateSensitiveCommands = ['approve', 'reject'];
+        if (baseCommand !== 'start' && !stateSensitiveCommands.includes(baseCommand)) {
+            // Clear state unless it's a dedicated state-handling input
+            if (currentState?.state !== 'waiting_for_txid' && currentState?.state !== 'waiting_for_custom_gb' && currentState?.state !== 'waiting_for_create_panel' && currentState?.state !== 'waiting_for_redeem_panel') {
+                await setUserState(userId, 'clear', {}, env);
+            }
+        } else if (baseCommand === 'start') {
+            await setUserState(userId, 'clear', {}, env); // Always clear on /start
+        }
+
+
+        switch (baseCommand) {
+            case 'start':
+                await handleStart(chatId, username, firstName, lastName, messageId, false, deepLink, env);
+                break;
+
+            case 'premium':
+                await handlePremium(chatId, null, false, env);
+                break;
+
+            case 'referral':
+                await handleReferral(chatId, userId, null, env);
+                break;
+
+            case 'apps':
+                await handleApps(chatId, null, env);
+                break;
+
+            case 'language':
+                await handleLanguage(chatId, null, env);
+                break;
+
+            case 'trial':
+                await handleTrial(chatId, userId, env);
+                break;
+
+            case 'mytrial':
+                await handleMyTrial(chatId, userId, env);
+                break;
+
+            case 'id':
+                await handleId(chatId, params, env);
+                break;
+
+            case 'check':
+                const config = paramString;
+                if (config) {
+                    await handleV2RayConfig(chatId, config, env);
+                } else {
+                    const lang = await get_user_language(chatId, env);
+                    await sendMessage(chatId, get_text('check_usage', lang), null, true, token);
+                }
+                break;
+
+            case 'create':
+                await handleCreate(chatId, params, env);
+                break;
+
+            case 'delprem':
+                await handleDelPrem(chatId, params, env);
+                break;
+
+            case 'deltrial':
+                const trialId = params[0];
+                if (trialId) {
+                    await handleDelTrial(chatId, trialId, env);
+                } else {
+                    const lang = await get_user_language(chatId, env);
+                    await sendMessage(chatId, get_text('admin_usage', lang) + " " + get_text('cmd_deltrial', lang), null, true, token);
+                }
+                break;
+
+            case 'delexp':
+                const panel = params[0];
+                await handleDelExp(chatId, panel, env);
+                break;
+
+            case 'request':
+                await handleRequestCommand(chatId, text, username, userId, env);
+                break;
+
+            case 'reply':
+                await handleReply(chatId, params, env);
+                break;
+
+            case 'stats': // Admin Only Command (Publicly accessible via menu but /stats is admin-only)
+                await handleStats(chatId, messageId, false, 'menu_start', env);
+                break;
+
+            case 'online': // NEW
+                await handleOnlineUsers(chatId, messageId, 1, false, env);
+                break;
+
+            case 'broadcast':
+                await handleBroadcast(chatId, update, env);
+                break;
+
+            // NEW ADMIN COMMANDS
+            case 'admin':
+                await handleAdminMenu(chatId, messageId, env);
+                break;
+
+            case 'transfer':
+                await handleTransfer(chatId, params, env);
+                break;
+
+            case 'reset':
+                await handleResetTraffic(chatId, params, env);
+                break;
+
+            case 'mod':
+                await handleModifyAccount(chatId, params, env);
+                break;
+
+            case 'bulk':
+                await handleBulkCreate(chatId, params, env);
+                break;
+
+            case 'runwarnings':
+                await handleRunWarnings(chatId, env);
+                break;
+
+            case 'optimal':
+                await handleOptimalPanel(chatId, params, env);
+                break;
+            // END NEW ADMIN COMMANDS
+
+            case 'approve':
+                if (params.length >= 2 && !isNaN(parseInt(params[0])) && !isNaN(parseInt(params[1]))) {
+                    await handleAdminApprove(chatId, parseInt(params[0]), parseInt(params[1]), null, env);
+                } else {
+                    const lang = await get_user_language(chatId, env);
+                    await sendMessage(chatId, get_text('admin_usage_approve', lang) + "\n\nExample: `/approve 123456789 150`", null, true, token);
+                }
+                break;
+
+            case 'reject':
+                if (params.length >= 1 && !isNaN(parseInt(params[0]))) {
+                    await handleAdminReject(chatId, parseInt(params[0]), null, env);
+                } else {
+                    const lang = await get_user_language(chatId, env);
+                    await sendMessage(chatId, get_text('admin_usage_reject', lang) + "\n\nExample: `/reject 123456789`", null, true, token);
+                }
+                break;
+
+            case 'ban':
+                if (paramString) {
+                    await handleBan(chatId, paramString, env);
+                } else {
+                    const lang = await get_user_language(chatId, env);
+                    await sendMessage(chatId, get_text('admin_usage', lang) + " " + get_text('cmd_ban', lang), null, true, token);
+                }
+                break;
+
+            case 'unban':
+                if (paramString) {
+                    await handleUnban(chatId, paramString, env);
+                } else {
+                    const lang = await get_user_language(chatId, env);
+                    await sendMessage(chatId, get_text('admin_usage', lang) + " " + get_text('cmd_unban', lang), null, true, token);
+                }
+                break;
+
+            case 'addcredit':
+                await handleCreditControl(chatId, params, 'add', env);
+                break;
+
+            case 'removecredit':
+                await handleCreditControl(chatId, params, 'deduct', env);
+                break;
+
+            case 'getkv':
+                await handleGetKV(chatId, params[0], env);
+                break;
+
+            case 'setkv':
+                const kvKey = params[0];
+                // Get the rest of the string after /setkv and the key
+                const kvValue = paramString.substring(kvKey.length).trim();
+                await handleSetKV(chatId, kvKey, kvValue, env);
+                break;
+
+            case 'help':
+                await handleHelp(chatId, env);
+                break;
+        }
+    }
+    return;
+}
+
+/**
+ * Handle callback queries from inline keyboards (async).
+ * @param {Object} env Cloudflare environment object
+ */
+export async function handleCallbackQuery(callbackQuery, env) {
+    const token = env[TELEGRAM_BOT_TOKEN_ENV];
+    const data = callbackQuery.data;
+    const chatId = callbackQuery.message.chat.id;
+    const messageId = callbackQuery.message.message_id;
+    const userId = callbackQuery.from.id;
+    const username = callbackQuery.from.username ?? '';
+    const firstName = callbackQuery.from.first_name ?? '';
+    const lastName = callbackQuery.from.last_name ?? '';
+
+    // Save user for command processing (e.g., getting language)
+    await saveUser(userId, username, firstName, lastName, null, null, env);
+
+    await sendMessage(callbackQuery.from.id, "", null, true, token); // Dismiss loading state
+
+    // Clear user state on callback that changes menu flow
+    if (!data.startsWith('stats_') && !data.startsWith('method_select_') && !data.startsWith('premium_select_') && data !== 'redeem_custom_prompt' && !data.startsWith('online_page_') && !data.startsWith('view_my_keys_') && !data.startsWith('key_delete_') && !data.startsWith('admin_create_panel_') && !data.startsWith('redeem_panel_final_')) {
+        await setUserState(userId, 'clear', {}, env);
+    }
+
+    let match;
+    if (match = data.match(/^stats_users_(\d+)_(.*)$/)) {
+        const page = parseInt(match[1]);
+        const backCallback = match[2];
+        // Publicly accessible via the menu (NO INTERMEDIATE LOADING)
+        await handleRecentUsers(chatId, messageId, page, backCallback, env);
+        return;
+    }
+
+    // NEW: Online User Pagination
+    if (match = data.match(/^online_page_(\d+)$/)) {
+        const page = parseInt(match[1]);
+        // Note: isCallback is true here to prevent displaying the loading message.
+        await handleOnlineUsers(chatId, messageId, page, true, env);
+        return;
+    }
+
+    // NEW: User Key Pagination
+    if (match = data.match(/^view_my_keys_page_(\d+)$/)) {
+        const page = parseInt(match[1]);
+        await handleMyRedeemedKeys(chatId, userId, messageId, page, env);
+        return;
+    }
+
+    // NEW: User Key Delete Confirmation
+    if (match = data.match(/^key_delete_confirm_([a-zA-Z0-9]+)_(\d+)$/)) {
+        const key = match[1];
+        const panel = parseInt(match[2]);
+        await handleKeyDeleteConfirm(chatId, userId, messageId, key, panel, env);
+        return;
+    }
+
+    // NEW: User Key Delete Finalization
+    if (match = data.match(/^key_delete_final_([a-zA-Z0-9]+)_(\d+)$/)) {
+        const key = match[1];
+        const panel = parseInt(match[2]);
+        await handleKeyDeleteFinal(chatId, userId, messageId, key, panel, env);
+        return;
+    }
+
+    if (match = data.match(/^stats_summary_(.*)$/)) {
+        const backCallback = match[1];
+
+        if (backCallback === 'menu_start') {
+            await handleStart(chatId, username, firstName, lastName, messageId, true, null, env);
+        } else if (backCallback === 'menu_about') {
+            await handleAboutMe(chatId, messageId, env);
+        } else if (backCallback === 'menu_basic_stats') {
+            await handleStatsMenu(chatId, messageId, env);
+        } else if (backCallback === 'menu_admin') { // NEW
+            if (!isAdmin(userId)) return;
+            await handleAdminMenu(chatId, messageId, env);
+        }
+        return;
+    }
+
+    if (match = data.match(/^premium_select_(\d+)$/)) {
+        const gbLimit = parseInt(match[1]);
+        await handlePremiumSelect(chatId, userId, messageId, gbLimit, env);
+        return;
+    }
+
+    if (match = data.match(/^method_select_(\d+)_([a-z]+)$/)) {
+        const gbLimit = parseInt(match[1]);
+        const methodKey = match[2];
+        await handlePaymentMethodSelect(chatId, userId, messageId, gbLimit, methodKey, env);
+        return;
+    }
+
+    // NEW: Admin Create Panel Select
+    if (match = data.match(/^admin_create_panel_(\d+)_(\d+)_(\d+)_([a-zA-Z0-9@.-]+)$/)) {
+        const panel = parseInt(match[1]);
+        const gbLimit = parseInt(match[2]);
+        const daysLimit = parseInt(match[3]);
+        const userName = match[4];
+        await handleAdminPanelSelect(chatId, messageId, panel, gbLimit, daysLimit, userName, env);
+        return;
+    }
+
+    // NEW: Redeem Panel Selection Final
+    if (match = data.match(/^redeem_panel_final_(\d+)_([\d\.]+)_(\d+)$/)) {
+        const gbLimit = parseInt(match[1]);
+        const cost = parseFloat(match[2]);
+        const panel = parseInt(match[3]);
+        await handleRedeemPanelSelect(chatId, userId, messageId, gbLimit, cost, panel, env);
+        return;
+    }
+
+
+    if (match = data.match(/^admin_approve_(\d+)_(\d+)$/)) {
+        const targetUserId = parseInt(match[1]);
+        const gbLimit = parseInt(match[2]);
+        await handleAdminApprove(chatId, targetUserId, gbLimit, messageId, env);
+        return;
+    }
+
+    if (match = data.match(/^admin_reject_(\d+)$/)) {
+        const targetUserId = parseInt(match[1]);
+        await handleAdminReject(chatId, targetUserId, messageId, env);
+        return;
+    }
+
+    switch (data) {
+        case 'menu_start':
+            await handleStart(chatId, username, firstName, lastName, messageId, true, null, env);
+            break;
+        case 'menu_main':
+            await handleMainMenu(chatId, messageId, env);
+            break;
+        case 'menu_premium':
+            await setUserState(userId, 'clear', {}, env);
+            await handlePremium(chatId, messageId, true, env);
+            break;
+        case 'menu_premium_desc':
+            await handlePremiumDescription(chatId, messageId, env);
+            break;
+        case 'menu_about':
+            await handleAboutMe(chatId, messageId, env);
+            break;
+        case 'menu_policy':
+            await handlePolicyTerms(chatId, messageId, env);
+            break;
+        case 'referral_back':
+            await handleReferral(chatId, userId, messageId, env);
+            break;
+        case 'redeem_5gb':
+            // Redirect to panel selection
+            await handleRedeemSelectPanel(chatId, userId, messageId, 5, env);
+            break;
+        case 'redeem_10gb':
+            // Redirect to panel selection
+            await handleRedeemSelectPanel(chatId, userId, messageId, 10, env);
+            break;
+        case 'redeem_custom_prompt':
+            await handleCustomRedeemPrompt(chatId, userId, messageId, env);
+            break;
+        case 'show_credit_history':
+            await handleCreditHistory(chatId, messageId, env);
+            break;
+        case 'view_my_keys_page_1':
+            await handleMyRedeemedKeys(chatId, userId, messageId, 1, env);
+            break;
+        case 'verify_channel_join':
+            await handleVerifyJoin(chatId, userId, messageId, env);
+            break;
+
+        case 'menu_admin':
+            if (!isAdmin(userId)) return;
+            await handleAdminMenu(chatId, messageId, env);
+            break;
+
+        case 'admin_online_users':
+            if (!isAdmin(userId)) return;
+            await handleOnlineUsers(chatId, messageId, 1, true, env);
+            break;
+
+        case 'admin_run_warnings':
+            if (!isAdmin(userId)) return;
+            await handleRunWarnings(chatId, env);
+            break;
+
+        case 'admin_stats_full':
+            if (!isAdmin(userId)) return;
+            await handleStats(chatId, messageId, true, 'menu_admin', env);
+            break;
+
+        case 'admin_broadcast_prompt':
+            if (!isAdmin(userId)) return;
+            const lang = await get_user_language(chatId, env);
+            await sendMessage(chatId, get_text('broadcast_usage', lang), null, true, token);
+            break;
+
+        case 'menu_stats_btn':
+            await handleStatsMenu(chatId, messageId, env);
+            break;
+        case 'menu_server_btn':
+            await handleServerInfo(chatId, messageId, env);
+            break;
+
+        case 'stats_usage_report':
+            // Publicly accessible via the menu (NO INTERMEDIATE LOADING)
+            await handleStats(chatId, messageId, true, 'menu_basic_stats', env);
+            break;
+
+        case 'menu_basic_stats':
+            await handleStatsMenu(chatId, messageId, env);
+            break;
+
+        case 'ignore':
+            break;
+
+        case 'set_lang_' + LANG_EN:
+            await handleSetLanguage(chatId, userId, LANG_EN, messageId, env);
+            break;
+        case 'set_lang_' + LANG_MY:
+            await handleSetLanguage(chatId, userId, LANG_MY, messageId, env);
+            break;
+
+        case 'apps_ios':
+            await handleAppsIos(chatId, messageId, env);
+            break;
+        case 'apps_android':
+            await handleAppsAndroid(chatId, messageId, env);
+            break;
+        case 'apps_windows':
+            await handleAppsWindows(chatId, messageId, env);
+            break;
+        case 'apps_macos':
+            await handleAppsMacos(chatId, messageId, env);
+            break;
+        case 'apps_back':
+            await handleApps(chatId, messageId, env);
+            break;
+    }
+}
