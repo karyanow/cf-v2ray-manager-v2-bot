@@ -24,7 +24,7 @@ export const OWNER_ID = 1273841502;
 export const OWNER_URL = 'tg://user?id=' + OWNER_ID;
 
 // V2Ray API Configuration
-export const V2RAY_API_URL = 'ttak-api.alwaysdata.net/api.php';
+export const V2RAY_API_URL = 'https://ttak-api.alwaysdata.net/api.php';
 
 // Channel URL and ID
 export const CHANNEL_URL = 'https://t.me/TTAKVPN';
