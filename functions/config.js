@@ -84,17 +84,14 @@ import {
 function formatDate(input) {
     if (!input) return 'N/A';
 
-    // unix timestamp (seconds)
     if (typeof input === 'number') {
         return new Date(input * 1000).toLocaleString();
     }
 
-    // numeric string timestamp
     if (!isNaN(input)) {
         return new Date(Number(input) * 1000).toLocaleString();
     }
 
-    // already readable
     return String(input);
 }
 
