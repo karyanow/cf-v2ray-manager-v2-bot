@@ -252,7 +252,7 @@ export async function handleTrial(chatId, userId, env) {
     if (result.success) {
         const data = result.data;
         
-        // Expiry နှင့် Data Limit အမှန်ပေါ်စေရန် logic ပြင်ဆင်ခြင်း
+        // Data format များကို API structure နှင့်အညီ ခွဲထုတ်ခြင်း
         const dataLimitDisplay = data.traffic?.total?.text || data.data_limit || "5 GB";
         const expiryDisplay = data.expiry?.expiry_date || data.expiry?.formatted || data.expiry || "7 Days";
 
@@ -269,7 +269,7 @@ export async function handleTrial(chatId, userId, env) {
         // 4. Edit the message to show the final result
         await sendOrEditMessage(chatId, message, messageId, null, token);
     } else {
-        // Error ဖြစ်ပါက အမှားစာသားကို ပြသခြင်း
+        // Error ဖြစ်ပါက errorMessage ကို let ဖြင့် ကြေညာပြီး text ပြန်ဆက်ခြင်း
         let errorMessage = get_text('error_creation_failed', lang) + "\n━━━━━━━━━━━━━━━━━━━━━━\n\n" +
             get_text('error_prefix', lang) + ` \`${result.error}\`\n`;
 
