@@ -239,20 +239,16 @@ export async function handleTrial(chatId, userId, env) {
     const token = env[TELEGRAM_BOT_TOKEN_ENV];
     const lang = await get_user_language(chatId, env);
 
-    // 1. Send initial loading message
     const initialMsg = await sendMessage(chatId, get_text('status_creating_trial', lang), null, true, token);
     const messageId = initialMsg.data?.result?.message_id;
 
-    // 2. Clear user state
     await setUserState(userId, 'clear', {}, env);
 
-    // 3. API call to create trial account
     const result = await createTrialAccount(userId);
 
-        if (result.success) {
+    if (result.success) {
         const data = result.data;
-
-        // API response structure နဲ့ ကိုက်ညီအောင် ပြင်ဆင်ထားပါတယ်
+        // Data structure ကို စနစ်တကျ ခွဲထုတ်ခြင်း
         const dataLimitDisplay = data.traffic?.total?.text || data.data_limit || "5 GB";
         const expiryDisplay = data.expiry?.expiry_date || data.expiry?.formatted || data.expiry || "7 Days";
 
@@ -261,13 +257,20 @@ export async function handleTrial(chatId, userId, env) {
             get_text('field_password', lang) + ` \`${data.password}\`\n` +
             get_text('field_data_limit', lang) + ` ${dataLimitDisplay}\n` +
             get_text('field_expiry', lang) + ` ${expiryDisplay}\n` +
-            get_text('field_panel', lang) + ` ${data.panel_name}\n\n` +
+            get_text('field_panel', lang) + ` ${data.panel_name}\n\n" +
             get_text('field_link', lang) + `\`\`\`${data.link}\`\`\`\n\n` +
             get_text('field_qr', lang) + `\n${data.qr_code}\n\n` +
             get_text('tip_copy_link', lang);
 
-        // Edit the message to show the final result
         await sendOrEditMessage(chatId, message, messageId, null, token);
+    } else {
+        let errorMessage = get_text('error_creation_failed', lang) + "\n━━━━━━━━━━━━━━━━━━━━━━\n\n" +
+            get_text('error_prefix', lang) + ` \`${result.error}\`\n`;
+
+        if (result.error.includes('already exists')) {
+            errorMessage += "\n" + get_text('tip_create_new_trial', lang).replace('/trial', '/mytrial');
+        }
+        await sendOrEditMessage(chatId, errorMessage, messageId, null, token);
     } else {
         // FIX: Change 'const' to 'let' to allow reassignment via +=
         let errorMessage = get_text('error_creation_failed', lang) + "\n━━━━━━━━━━━━━━━━━━━━━━\n\n" +
