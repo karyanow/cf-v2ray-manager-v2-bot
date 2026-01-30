@@ -249,20 +249,24 @@ export async function handleTrial(chatId, userId, env) {
     // 3. API call to create trial account
     const result = await createTrialAccount(userId);
 
-    if (result.success) {
+        if (result.success) {
         const data = result.data;
+
+        // API response structure နဲ့ ကိုက်ညီအောင် ပြင်ဆင်ထားပါတယ်
+        const dataLimitDisplay = data.traffic?.total?.text || data.data_limit || "5 GB";
+        const expiryDisplay = data.expiry?.expiry_date || data.expiry?.formatted || data.expiry || "7 Days";
 
         const message = get_text('trial_success_title', lang) + "\n━━━━━━━━━━━━━━━━━━━━━━\n\n" +
             get_text('field_email', lang) + ` \`${data.email}\`\n` +
             get_text('field_password', lang) + ` \`${data.password}\`\n` +
-            get_text('field_data_limit', lang) + ` ${data.data_limit}\n` +
-            get_text('field_expiry', lang) + ` ${data.expiry}\n` +
+            get_text('field_data_limit', lang) + ` ${dataLimitDisplay}\n` +
+            get_text('field_expiry', lang) + ` ${expiryDisplay}\n` +
             get_text('field_panel', lang) + ` ${data.panel_name}\n\n` +
             get_text('field_link', lang) + `\`\`\`${data.link}\`\`\`\n\n` +
             get_text('field_qr', lang) + `\n${data.qr_code}\n\n` +
             get_text('tip_copy_link', lang);
 
-        // 4. Edit the message to show the final result
+        // Edit the message to show the final result
         await sendOrEditMessage(chatId, message, messageId, null, token);
     } else {
         // FIX: Change 'const' to 'let' to allow reassignment via +=
