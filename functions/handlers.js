@@ -278,21 +278,9 @@ export async function handleTrial(chatId, userId, env) {
         }
 
         await sendOrEditMessage(chatId, errorMessage, messageId, null, token);
-    } else {
-        // FIX: Change 'const' to 'let' to allow reassignment via +=
-        let errorMessage = get_text('error_creation_failed', lang) + "\n━━━━━━━━━━━━━━━━━━━━━━\n\n" +
-            get_text('error_prefix', lang) + ` \`${result.error}\`\n`;
-
-        // Check for specific error to show appropriate tip
-        if (result.error.includes('already exists')) {
-            // @ts-ignore
-            errorMessage += "\n" + get_text('tip_create_new_trial', lang).replace('/trial', '/mytrial');
-        }
-
-        // 4. Edit the message to show the error
-        await sendOrEditMessage(chatId, errorMessage, messageId, null, token);
     }
 }
+
 
 /**
  * Handle /mytrial command (Get existing trial account)
